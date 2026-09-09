@@ -835,8 +835,8 @@ function renderAssets(list) {
 
 function assetCardHTML(a) {
   var media = isVideo(a.path)
-    ? '<video class="h-full w-full object-cover" src="/output/' + encodeURI(a.path) + '" preload="metadata" muted playsinline></video>'
-    : '<img class="h-full w-full object-cover" src="/output/' + encodeURI(a.path) + '" loading="lazy">';
+    ? '<video class="h-full w-full object-cover" src="/assets/' + encodeURI(a.path) + '" preload="metadata" muted playsinline></video>'
+    : '<img class="h-full w-full object-cover" src="/assets/' + encodeURI(a.path) + '" loading="lazy">';
   return '<div class="asset-card overflow-hidden rounded-xl border border-white/[0.08] bg-[#1b1b25] transition hover:border-white/20" data-path="' + esc(a.path) + '">'
     + '<div class="relative aspect-video bg-black">' + media + '<div class="pointer-events-none absolute inset-x-0 bottom-0 flex h-8 items-end bg-gradient-to-t from-black/80 to-transparent p-1.5 text-[10px] text-white/70">' + fmtSize(a.size) + '</div></div>'
     + '<div class="p-3">'
@@ -846,7 +846,7 @@ function assetCardHTML(a) {
     + '<div class="mt-2 flex items-center gap-2">'
     + '<button data-action="asset-tag" class="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-violet-400/40 hover:text-violet-300" title="AI 打标签"><iconify-icon icon="lucide:brain" width="13"></iconify-icon></button>'
     + '<button data-action="asset-tag-manual" class="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-amber-400/40 hover:text-amber-300" title="手动打标签（离线可用）"><iconify-icon icon="lucide:tag" width="13"></iconify-icon></button>'
-    + '<a class="flex flex-1 items-center justify-center gap-1 rounded-lg border border-white/10 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-white/[0.06]" href="/output/' + encodeURI(a.path) + '" download><iconify-icon icon="lucide:download" width="13"></iconify-icon>下载</a>'
+    + '<a class="flex flex-1 items-center justify-center gap-1 rounded-lg border border-white/10 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-white/[0.06]" href="/assets/' + encodeURI(a.path) + '" download><iconify-icon icon="lucide:download" width="13"></iconify-icon>下载</a>'
     + '<button data-action="asset-del" class="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-red-400/40 hover:text-red-300" title="删除"><iconify-icon icon="lucide:trash-2" width="13"></iconify-icon></button>'
     + '</div></div></div>';
 }
@@ -893,6 +893,35 @@ async function manualTagAsset(path) {
     if (r.ok) { toast("标签已保存", "ok"); loadAssetsTags(); }
     else toast("保存失败：" + (r.error || ""), "err");
   } catch (e) { toast("保存失败：" + e.message, "err"); }
+}
+
+async function uploadAsset() {
+  var input = $("assetFileInput");
+  if (!input) { toast("上传控件未就绪", "err"); return; }
+  input.value = "";
+  input.click();
+  input.onchange = async function () {
+    var files = input.files;
+    if (!files || !files.length) return;
+    var okCount = 0;
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      var ext = (f.name.split(".").pop() || "png").toLowerCase();
+      if (["png", "jpg", "jpeg", "webp"].indexOf(ext) < 0) { toast("跳过不支持的格式：" + f.name, "err"); continue; }
+      var b64 = await new Promise(function (resolve, reject) {
+        var fr = new FileReader();
+        fr.onload = function () { resolve(String(fr.result).split(",")[1]); };
+        fr.onerror = function () { reject(new Error("读取失败")); };
+        fr.readAsDataURL(f);
+      });
+      try {
+        var r = await api("/api/assets/upload", { data_b64: b64, filename: f.name, ext: ext });
+        if (r.ok) { okCount++; toast("素材已入库：" + f.name, "ok"); }
+        else toast("上传失败：" + (r.error || ""), "err");
+      } catch (e) { toast("上传失败：" + e.message, "err"); }
+    }
+    if (okCount) loadAssets();
+  };
 }
 
 async function aiScript() {

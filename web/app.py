@@ -44,6 +44,7 @@ COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188")
 MODELS_DIR = os.environ.get("MODELS_DIR", os.path.join(_COMFY_ROOT, "models"))
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", os.path.join(_COMFY_ROOT, "output", "video"))
 INPUT_DIR = os.environ.get("INPUT_DIR", os.path.join(_COMFY_ROOT, "input"))
+ASSETS_DIR = os.environ.get("ASSETS_DIR", os.path.join(_COMFY_ROOT, "assets"))
 FONT = os.environ.get("FONT", "C:/Windows/Fonts/simhei.ttf")
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 
@@ -547,9 +548,9 @@ def concat_scenes(clips, subtitles):
 
 
 def list_assets():
-    """列出 output 目录下所有视频/图片素材。"""
-    base = os.path.abspath(OUTPUT_DIR)
-    exts = (".mp4", ".webm", ".mov", ".mkv", ".avi", ".png", ".jpg", ".jpeg", ".gif", ".webp")
+    """列出素材库（assets 目录）下的图片素材；生成产物（output）不属于素材库。"""
+    base = os.path.abspath(ASSETS_DIR)
+    exts = (".png", ".jpg", ".jpeg", ".webp", ".gif")
     out = []
     if os.path.isdir(base):
         for root, _dirs, files in os.walk(base):
@@ -560,12 +561,46 @@ def list_assets():
                     st = os.stat(full)
                     out.append({"name": f, "path": rel, "size": st.st_size, "mtime": int(st.st_mtime)})
     out.sort(key=lambda x: x["mtime"], reverse=True)
+    _sync_asset_stores(out)
     return out
+
+
+def _sync_asset_stores(assets):
+    """素材索引同步（30s 节流）：MySQL 事实表（自增 id）→ Neo4j 按 id 建 Asset/Tag 图。"""
+    global _LAST_ASSET_SYNC
+    now = time.time()
+    if now - _LAST_ASSET_SYNC < 30:
+        return
+    tags = _load_json(TAGS_FILE, {})
+    if not _mysql_ensure():
+        _LAST_ASSET_SYNC = now
+        return
+    rows = []
+    for a in assets:
+        rows.append("(%s,%s,%d,%d,%s,'manual')" % (_sql_quote(a["path"]), _sql_quote(a["name"]), int(a.get("size") or 0), int(a.get("mtime") or 0), _sql_quote(tags.get(a.get("path"), ""))))
+    if rows:
+        ok, _ = _mysql_run("INSERT INTO assets (path,name,size,mtime,tags,source) VALUES " + ",".join(rows) + " ON DUPLICATE KEY UPDATE name=VALUES(name),size=VALUES(size),mtime=VALUES(mtime)")
+    else:
+        ok = True
+    if not ok:
+        _LAST_ASSET_SYNC = now
+        return
+    paths = ",".join(_sql_quote(a["path"]) for a in assets)
+    _mysql_run("DELETE FROM assets WHERE path NOT IN (%s)" % (paths or "''"))
+    ok2, out = _mysql_run("SELECT id,path,name,tags FROM assets")
+    if ok2:
+        g_rows = []
+        for line in out.splitlines():
+            parts = line.split("\t", 3)
+            if len(parts) >= 4 and parts[1]:
+                g_rows.append({"id": int(parts[0]) if parts[0].isdigit() else None, "path": parts[1], "name": parts[2], "tags": parts[3]})
+        _neo4j_index_assets(g_rows)
+    _LAST_ASSET_SYNC = now
 
 
 def resolve_asset_path(rel):
     """把素材相对路径解析为绝对路径，并做包含性校验。"""
-    base = os.path.abspath(OUTPUT_DIR)
+    base = os.path.abspath(ASSETS_DIR)
     p = os.path.abspath(os.path.join(base, (rel or "").replace("/", os.sep)))
     if p != base and not p.startswith(base + os.sep):
         raise ValueError("非法路径")
@@ -584,6 +619,147 @@ def _looks_like_image(raw, ext):
 # ---- AI 大脑（本地知识图谱 + DeepSeek / Qwen-VL） ----
 KNOWLEDGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "script_graph.json")
 TAGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets_tags.json")
+
+# ---- MySQL 素材库（零依赖走本机 mysql.exe；默认 root 无密码，库 comfyui_assets） ----
+MYSQL_EXE = os.environ.get("MYSQL_EXE", r"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe")
+MYSQL_HOST = os.environ.get("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.environ.get("MYSQL_PORT", "3306")
+MYSQL_USER = os.environ.get("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
+MYSQL_DB = os.environ.get("MYSQL_DB", "comfyui_assets")
+
+_MYSQL_READY = None
+_MYSQL_CHECKED = 0.0
+_LAST_ASSET_SYNC = 0.0
+
+
+def _sql_quote(v):
+    if v is None:
+        return "NULL"
+    return "'" + str(v).replace("\\", "\\\\").replace("'", "\\'").replace("\x00", "") + "'"
+
+
+def _mysql_run(sql, db=True, timeout=30):
+    """用本机 mysql.exe 执行 SQL，返回 (ok, output)。"""
+    if not re.fullmatch(r"[A-Za-z0-9_]+", MYSQL_DB):
+        return False, "MYSQL_DB 含非法字符"
+    if not os.path.isfile(MYSQL_EXE):
+        return False, "mysql.exe 不存在"
+    env = dict(os.environ)
+    if MYSQL_PASSWORD:
+        env["MYSQL_PWD"] = MYSQL_PASSWORD
+    cmd = [MYSQL_EXE, "--default-character-set=utf8mb4", "-h", MYSQL_HOST, "-P", MYSQL_PORT, "-u", MYSQL_USER, "-N", "-B"]
+    if db:
+        cmd.append(MYSQL_DB)
+    try:
+        r = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=timeout, env=env, encoding="utf-8", errors="replace")
+    except Exception as e:
+        return False, str(e)
+    if r.returncode != 0:
+        return False, r.stderr.strip()
+    return True, r.stdout
+
+
+def _mysql_ensure():
+    """惰性建库建表；失败 30 秒内不重试。旧版无自增 id 的表会被重建。"""
+    global _MYSQL_READY, _MYSQL_CHECKED
+    now = time.time()
+    if _MYSQL_READY or now - _MYSQL_CHECKED < 30:
+        return bool(_MYSQL_READY)
+    _MYSQL_CHECKED = now
+    ok, _ = _mysql_run("CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" % MYSQL_DB, db=False)
+    if not ok:
+        _MYSQL_READY = False
+        return False
+    ok, cols = _mysql_run("SHOW COLUMNS FROM assets")
+    if ok:
+        names = [line.split("\t")[0] for line in cols.splitlines()]
+        if "id" not in names:
+            _mysql_run("DROP TABLE IF EXISTS assets")
+            _mysql_run("DROP TABLE IF EXISTS auto_match_log")
+    ok, _ = _mysql_run(
+        "CREATE TABLE IF NOT EXISTS assets ("
+        " id BIGINT AUTO_INCREMENT PRIMARY KEY,"
+        " path VARCHAR(512) NOT NULL UNIQUE,"
+        " name VARCHAR(255) NOT NULL,"
+        " size BIGINT NOT NULL DEFAULT 0,"
+        " mtime INT NOT NULL DEFAULT 0,"
+        " tags TEXT,"
+        " source VARCHAR(32) NOT NULL DEFAULT 'upload',"
+        " used_count INT NOT NULL DEFAULT 0,"
+        " used_by TEXT,"
+        " last_used_at DATETIME NULL,"
+        " created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+        " updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+        "CREATE TABLE IF NOT EXISTS auto_match_log ("
+        " id BIGINT AUTO_INCREMENT PRIMARY KEY,"
+        " prompt TEXT,"
+        " matched_id BIGINT NULL,"
+        " matched_path VARCHAR(512),"
+        " matched_name VARCHAR(255),"
+        " score INT NOT NULL DEFAULT 0,"
+        " tags TEXT,"
+        " hit TINYINT NOT NULL DEFAULT 0,"
+        " created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;")
+    _MYSQL_READY = ok
+    return bool(ok)
+
+
+def _mysql_set_asset(path, name, size=0, mtime=0, tags="", source="upload"):
+    """写入/更新素材行，返回自增 id；MySQL 不可用返回 None。"""
+    if not _mysql_ensure():
+        return None
+    ok, _ = _mysql_run("INSERT INTO assets (path,name,size,mtime,tags,source) VALUES (%s,%s,%d,%d,%s,%s) ON DUPLICATE KEY UPDATE name=VALUES(name),size=VALUES(size),mtime=VALUES(mtime),tags=VALUES(tags)"
+                       % (_sql_quote(path), _sql_quote(name), int(size or 0), int(mtime or 0), _sql_quote(tags), _sql_quote(source)))
+    if not ok:
+        return None
+    ok2, out = _mysql_run("SELECT id FROM assets WHERE path=%s" % _sql_quote(path))
+    if ok2 and out.strip().isdigit():
+        return int(out.strip())
+    return None
+
+
+def _record_asset_usage(path, scene_id, prompt):
+    """图片被输入生成时记录使用信息：次数 +1、最近使用时间、用途（镜头/提示词）。"""
+    if not _mysql_ensure():
+        return
+    _mysql_run("UPDATE assets SET used_count=used_count+1, last_used_at=NOW(), used_by=CONCAT_WS(';', used_by, %s) WHERE path=%s"
+               % (_sql_quote((scene_id or "")[:120] + ": " + (prompt or "")[:80]), _sql_quote(path)))
+
+
+def _mysql_delete_asset(path):
+    if not _mysql_ensure():
+        return
+    _mysql_run("DELETE FROM assets WHERE path=%s" % _sql_quote(path))
+
+
+def _mysql_load_assets():
+    """读素材索引（含自增 id）；MySQL 不可用返回 None（调用方回退本地）。"""
+    if not _mysql_ensure():
+        return None
+    ok, out = _mysql_run("SELECT id,path,name,tags FROM assets")
+    if not ok:
+        return None
+    rows = []
+    for line in out.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) >= 2 and parts[1]:
+            rows.append({"id": int(parts[0]) if parts[0].isdigit() else None, "path": parts[1], "name": parts[2], "tags": parts[3] if len(parts) > 3 else ""})
+    return rows
+
+
+def _mysql_log_match(prompt, result):
+    """每次自动匹配都写流水（命中 hit=1，未命中 hit=0）。"""
+    if not _mysql_ensure():
+        return
+    if result:
+        _mysql_run("INSERT INTO auto_match_log (prompt,matched_id,matched_path,matched_name,score,tags,hit) VALUES (%s,%s,%s,%s,%d,%s,1)"
+                   % (_sql_quote(prompt), _sql_quote(result.get("id")), _sql_quote(result.get("path")), _sql_quote(result.get("name")),
+                      int(result.get("score") or 0), _sql_quote(result.get("tags"))))
+    else:
+        _mysql_run("INSERT INTO auto_match_log (prompt,hit) VALUES (%s,0)" % _sql_quote(prompt))
 
 DEFAULT_KNOWLEDGE_GRAPH = {
     "nodes": [
@@ -682,6 +858,93 @@ def ensure_knowledge_graph():
                         "MATCH (a:KGNode {id:$f}), (b:KGNode {id:$t}) MERGE (a)-[:RELATES {relation:$r}]->(b)",
                         f=e.get("from"), t=e.get("to"), r=e.get("relation", ""),
                     )
+    except Exception:
+        pass
+    finally:
+        d.close()
+
+
+def _neo4j_index_assets(rows, prune=True):
+    """素材入图：Asset 节点以 MySQL 自增 id 为主键，标签拆 Tag 节点连 HAS_TAG；
+    prune=True 时移除已不在素材库的节点（全量同步用，单条更新必须传 False）。"""
+    d = _neo4j_driver()
+    if not d:
+        return
+    try:
+        with d.session() as s:
+            if prune:
+                s.run("MATCH (a:Asset) WHERE NOT a.path IN $paths DETACH DELETE a", paths=[r["path"] for r in rows])
+            for r in rows:
+                aid = r.get("id")
+                if aid is None:
+                    continue
+                s.run("MERGE (a:Asset {id:$id}) SET a.path=$p, a.name=$n", id=int(aid), p=r["path"], n=r.get("name") or "")
+                for t in re.split(r"[,，|。:：]+", (r.get("tags") or "").strip()):
+                    t = t.strip()
+                    if t:
+                        s.run("MERGE (t:Tag {name:$t}) WITH t MATCH (a:Asset {id:$id}) MERGE (a)-[:HAS_TAG]->(t)", t=t, id=int(aid))
+    except Exception:
+        pass
+    finally:
+        d.close()
+
+
+def _neo4j_unindex_asset(path):
+    d = _neo4j_driver()
+    if not d:
+        return
+    try:
+        with d.session() as s:
+            s.run("MATCH (a:Asset {path:$p}) DETACH DELETE a", p=path)
+    except Exception:
+        pass
+    finally:
+        d.close()
+
+
+def _neo4j_keyword_groups():
+    """读知识图谱各节点关键词分组，供自动匹配做语义扩展；失败返回 None。"""
+    d = _neo4j_driver()
+    if not d:
+        return None
+    try:
+        with d.session() as s:
+            rows = s.run("MATCH (n:KGNode) RETURN n.id AS id, n.keywords AS keywords, n.label AS label").data()
+        return {r["id"]: {"keywords": [str(k).lower() for k in (r.get("keywords") or [])], "label": r.get("label") or ""} for r in rows}
+    except Exception:
+        return None
+    finally:
+        d.close()
+
+
+def _neo4j_match_tags(kws):
+    """图算法检索：提示词关键词沿 Tag<-HAS_TAG-Asset 路径命中素材，返回 {path: 命中标签数}；失败返回 None。"""
+    if not kws:
+        return {}
+    d = _neo4j_driver()
+    if not d:
+        return None
+    try:
+        with d.session() as s:
+            rows = s.run("MATCH (t:Tag)<-[:HAS_TAG]-(a:Asset) WHERE toLower(t.name) IN $kws RETURN a.path AS path, count(t) AS c", kws=kws).data()
+        return {r["path"]: r["c"] for r in rows}
+    except Exception:
+        return None
+    finally:
+        d.close()
+
+
+def _neo4j_asset_fits(path, node_ids):
+    """沉淀匹配知识：素材与命中的镜头语义节点建立 FITS 关系。"""
+    if not node_ids:
+        return
+    d = _neo4j_driver()
+    if not d:
+        return
+    try:
+        with d.session() as s:
+            for nid in node_ids:
+                s.run("MATCH (a:Asset {path:$p}), (k:KGNode {id:$i}) MERGE (a)-[:FITS]->(k)", p=path, i=nid)
     except Exception:
         pass
     finally:
@@ -827,6 +1090,9 @@ def tag_asset_with_ai(path, api_key=None, base_url=None, model=None, prompt=None
             json.dump(data, open(TAGS_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         except Exception:
             pass
+        aid = _mysql_set_asset(path, os.path.basename(path), tags=tags, source="manual")
+        if aid is not None:
+            _neo4j_index_assets([{"id": aid, "path": path, "name": os.path.basename(path), "tags": tags}], prune=False)
         return {"ok": True, "tags": tags}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -848,33 +1114,53 @@ def search_assets(q):
 
 
 def auto_match_image(prompt):
-    """按提示词检索素材库：文件名/标签里的关键词在提示词中出现越多分越高。只匹配图片。"""
-    prompt = (prompt or "").lower()
-    tags = _load_json(TAGS_FILE, {})
+    """自动匹配素材图（图算法检索）：Neo4j 沿 提示词关键词→Tag→Asset 路径检索并计命中标签数，
+    叠加知识图谱语义扩展与文件名打分；每次调用写 MySQL 匹配流水（带素材 id），命中素材与镜头语义沉淀 FITS。
+    任一数据库不可用时回退本地目录/JSON，功能不中断。"""
+    prompt_text = (prompt or "").lower()
+    assets = list_assets()
+    tags_json = _load_json(TAGS_FILE, {})
+    rows = _mysql_load_assets()
+    if rows is None:
+        rows = [{"id": None, "path": a["path"], "name": a["name"], "tags": tags_json.get(a["path"], "")} for a in assets]
+    kws = [kw for kw in re.split(r"[^0-9a-z一-鿿]+", prompt_text) if len(kw) >= 2]
+    extra_kws = []
+    hit_nodes = []
+    groups = _neo4j_keyword_groups()
+    if groups:
+        for nid, g in groups.items():
+            gkws = g["keywords"]
+            if any(kw and kw in prompt_text for kw in gkws):
+                hit_nodes.append(nid)
+                for kw in gkws:
+                    if kw and kw not in extra_kws:
+                        extra_kws.append(kw)
+    graph_hits = _neo4j_match_tags(kws)
     best = None
-    for a in list_assets():
-        if is_video(a.get("path") or ""):
-            continue
-        score = 0
-        stem = (a.get("name") or "").split(".")[0].lower()
+    for r in rows:
+        score = 3 * int(graph_hits.get(r["path"], 0)) if graph_hits is not None else 0
+        stem = (r.get("name") or "").split(".")[0].lower()
         for kw in re.split(r"[^0-9a-z一-鿿]+", stem):
-            if len(kw) >= 2 and kw in prompt:
+            if len(kw) >= 2 and kw in prompt_text:
                 score += 2
-        tag_text = (tags.get(a.get("path"), "") or "").lower()
-        for kw in re.split(r"[,，|。:：]+", tag_text):
-            kw = kw.strip()
-            if len(kw) >= 2 and kw in prompt:
-                score += 3
+        tag_text = (r.get("tags") or "").lower()
+        if graph_hits is None:
+            for kw in re.split(r"[,，|。:：]+", tag_text):
+                kw = kw.strip()
+                if len(kw) >= 2 and kw in prompt_text:
+                    score += 3
+        for kw in extra_kws:
+            if kw and kw in tag_text:
+                score += 2
         if score > 0 and (best is None or score > best[0]):
-            best = (score, a)
-    if not best:
-        return None
-    score, a = best
-    return {"path": a["path"], "name": a["name"], "score": score, "tags": tags.get(a["path"], "")}
-
-
-def is_video(p):
-    return bool(re.search(r"\.(mp4|webm|mov|mkv|avi)$", p, re.I))
+            best = (score, r)
+    result = None
+    if best:
+        score, r = best
+        result = {"id": r.get("id"), "path": r["path"], "name": r["name"], "score": score, "tags": r.get("tags", "")}
+        _neo4j_asset_fits(result["path"], hit_nodes)
+    _mysql_log_match(prompt or "", result)
+    return result
 
 
 # ---- 脚本解析/优化 ----
@@ -1403,21 +1689,27 @@ def concat_segments_sync(st):
 # ---- HTTP ----
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, obj):
-        data = json.dumps(obj, ensure_ascii=False).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            data = json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass
 
     def _send_file(self, p, ct):
-        self.send_response(200)
-        self.send_header("Content-Type", ct)
-        self.send_header("Content-Length", str(os.path.getsize(p)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        with open(p, "rb") as f:
-            self.wfile.write(f.read())
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(os.path.getsize(p)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with open(p, "rb") as f:
+                self.wfile.write(f.read())
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass
 
     def _body(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
@@ -1428,6 +1720,11 @@ class Handler(BaseHTTPRequestHandler):
             p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html")
             if os.path.exists(p):
                 self._send_file(p, "text/html; charset=utf-8")
+                return
+        elif self.path == "/favicon.ico":
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "favicon.svg")
+            if os.path.exists(p):
+                self._send_file(p, "image/svg+xml")
                 return
         elif self.path.startswith("/static/"):
             p = os.path.join(os.path.dirname(os.path.abspath(__file__)), self.path.lstrip("/").replace("/", os.sep))
@@ -1440,6 +1737,13 @@ class Handler(BaseHTTPRequestHandler):
             p = os.path.join(OUTPUT_DIR, rel)
             if os.path.exists(p) and os.path.isfile(p):
                 self._send_file(p, "video/mp4" if p.endswith(".mp4") else "application/octet-stream")
+                return
+        elif self.path.startswith("/assets/"):
+            rel = unquote(self.path[len("/assets/"):]).replace("/", os.sep)
+            p = os.path.join(ASSETS_DIR, rel)
+            if os.path.isfile(p) and os.path.abspath(p).startswith(os.path.abspath(ASSETS_DIR) + os.sep):
+                ct = "image/png" if p.lower().endswith(".png") else "image/jpeg" if p.lower().endswith((".jpg", ".jpeg")) else "image/webp" if p.lower().endswith(".webp") else "image/gif" if p.lower().endswith(".gif") else "application/octet-stream"
+                self._send_file(p, ct)
                 return
         elif self.path == "/api/status":
             try:
@@ -1520,6 +1824,7 @@ class Handler(BaseHTTPRequestHandler):
                             dst_name = "auto_" + time.strftime("%H%M%S") + "_" + str(random.randrange(100, 999)) + ext
                             shutil.copyfile(src, os.path.join(frames_dir, dst_name))
                             raw["first_frame"] = "frames/" + dst_name
+                            _record_asset_usage(m["path"], str(raw.get("id") or "scene"), str(raw.get("prompt") or ""))
                             matched = {"name": m["name"], "path": m["path"], "score": m["score"]}
                         except Exception as e:
                             matched = {"error": str(e)}
@@ -1685,12 +1990,34 @@ class Handler(BaseHTTPRequestHandler):
                     st = load_state()
                     threading.Thread(target=generate_segments_job, args=(st,), daemon=True).start()
                     self._send(200, {"ok": True, "started": True})
+            elif self.path == "/api/assets/upload":
+                body = self._body()
+                raw = base64.b64decode(body.get("data_b64") or "")
+                ext = str(body.get("ext") or "png").lower()
+                if ext not in ("png", "jpg", "jpeg", "webp"):
+                    self._send(200, {"ok": False, "error": "素材库仅支持 png/jpg/webp 图片"})
+                    return
+                if not raw or len(raw) > 50 * 1024 * 1024 or not _looks_like_image(raw, ext):
+                    self._send(200, {"ok": False, "error": "图片内容无效或超过 50MB"})
+                    return
+                os.makedirs(ASSETS_DIR, exist_ok=True)
+                stem = re.sub(r"[^0-9a-zA-Z_-]", "", str(body.get("filename") or "").split(".")[0])[:40] or "asset"
+                fname = stem + "_" + time.strftime("%H%M%S") + "_" + str(random.randrange(1000, 9999)) + "." + ext
+                with open(os.path.join(ASSETS_DIR, fname), "wb") as f:
+                    f.write(raw)
+                st = os.stat(os.path.join(ASSETS_DIR, fname))
+                aid = _mysql_set_asset(fname, fname, st.st_size, int(st.st_mtime), "", "upload")
+                if aid is not None:
+                    _neo4j_index_assets([{"id": aid, "path": fname, "name": fname, "tags": ""}], prune=False)
+                self._send(200, {"ok": True, "file": fname, "id": aid})
             elif self.path == "/api/assets/delete":
                 rel = (self._body().get("path") or "").replace("\\", "/").lstrip("/")
                 try:
                     p = resolve_asset_path(rel)
                     if os.path.isfile(p):
                         os.remove(p)
+                        _mysql_delete_asset(rel)
+                        _neo4j_unindex_asset(rel)
                         self._send(200, {"ok": True})
                     else:
                         self._send(200, {"ok": False, "error": "文件不存在"})
@@ -1717,6 +2044,9 @@ class Handler(BaseHTTPRequestHandler):
                     json.dump(data, open(TAGS_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
                 except Exception:
                     pass
+                aid = _mysql_set_asset(pth, os.path.basename(pth), tags=t, source="manual")
+                if aid is not None:
+                    _neo4j_index_assets([{"id": aid, "path": pth, "name": os.path.basename(pth), "tags": t}], prune=False)
                 self._send(200, {"ok": True, "tags": t})
             elif self.path == "/api/knowledge":
                 g = self._body().get("graph") or {}
@@ -1727,6 +2057,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, {"ok": False, "error": err})
             else:
                 self._send(404, {"error": "not found"})
+        except json.JSONDecodeError:
+            self._send(400, {"ok": False, "error": "无效的 JSON 请求体"})
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass
         except Exception as e:
             import traceback
             traceback.print_exc()
