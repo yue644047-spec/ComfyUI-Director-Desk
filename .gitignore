@@ -1,0 +1,29 @@
+# secrets
+web/.env
+
+# user data
+web/state.json
+web/state.json.bak_*
+web/assets_tags.json
+
+# runtime outputs / logs
+web/server.*.log
+output/
+input/
+temp/
+*.log
+
+# models
+models/
+
+# migration large artifacts
+migration/*.tar.gz
+migration/*.zip
+migration/_stage/
+
+# python
+__pycache__/
+*.pyc
+
+# scratch
+*.bak

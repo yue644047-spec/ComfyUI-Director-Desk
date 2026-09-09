@@ -1,0 +1,156 @@
+{
+  "nodes": [
+    {
+      "id": "shot_wide",
+      "type": "景别",
+      "label": "远景空镜",
+      "text": "远景/空镜用于开场建场或段落过渡，交代时间地点氛围，常作情绪留白。",
+      "keywords": [
+        "远景",
+        "空镜",
+        "开场",
+        "城市",
+        "风景",
+        "天际线",
+        "街道"
+      ]
+    },
+    {
+      "id": "shot_medium",
+      "type": "景别",
+      "label": "中景",
+      "text": "中景交代人物动作与周围环境的关系，是叙事主力景别。",
+      "keywords": [
+        "中景",
+        "动作",
+        "人物"
+      ]
+    },
+    {
+      "id": "shot_closeup",
+      "type": "景别",
+      "label": "特写",
+      "text": "特写放大情绪与细节（手指、眼神、器物），浅景深，突出主体。",
+      "keywords": [
+        "特写",
+        "细节",
+        "情绪",
+        "眼神",
+        "手指"
+      ]
+    },
+    {
+      "id": "camera_push",
+      "type": "运镜",
+      "label": "推镜",
+      "text": "缓慢推近营造紧张、聚焦或情绪递进。",
+      "keywords": [
+        "推近",
+        "推镜",
+        "聚焦",
+        "紧张",
+        "递进"
+      ]
+    },
+    {
+      "id": "camera_pan",
+      "type": "运镜",
+      "label": "摇镜",
+      "text": "水平/垂直摇镜用于展示环境、跟随视线。",
+      "keywords": [
+        "摇镜",
+        "环境",
+        "视线"
+      ]
+    },
+    {
+      "id": "style_cinematic",
+      "type": "风格",
+      "label": "电影感",
+      "text": "电影质感，真实实拍风格，浅景深，胶片颗粒，冷暖对比光。",
+      "keywords": [
+        "电影感",
+        "电影",
+        "写实"
+      ],
+      "always": true
+    },
+    {
+      "id": "style_neon",
+      "type": "风格",
+      "label": "霓虹夜",
+      "text": "夜景霓虹色调，冷蓝+品红对比，湿润反光，赛博氛围。",
+      "keywords": [
+        "夜景",
+        "霓虹",
+        "夜晚",
+        "雨夜",
+        "深夜",
+        "城市夜"
+      ]
+    },
+    {
+      "id": "style_warm",
+      "type": "风格",
+      "label": "温情暖调",
+      "text": "暖色轮廓光，逆光发丝，柔和高光，温馨治愈氛围。",
+      "keywords": [
+        "温情",
+        "温暖",
+        "治愈",
+        "暖心",
+        "爱"
+      ]
+    },
+    {
+      "id": "struct_open",
+      "type": "结构",
+      "label": "开场",
+      "text": "开场 1-2 镜用远景/特写建立场景与情绪基调。",
+      "keywords": [
+        "开场",
+        "开始"
+      ],
+      "always": true
+    },
+    {
+      "id": "struct_close",
+      "type": "结构",
+      "label": "收尾",
+      "text": "结尾用空镜或回眸定格，留白，配字幕点题。",
+      "keywords": [
+        "结尾",
+        "收尾",
+        "结束"
+      ],
+      "always": true
+    }
+  ],
+  "edges": [
+    {
+      "from": "style_neon",
+      "to": "shot_wide",
+      "relation": "常搭配夜城空镜"
+    },
+    {
+      "from": "style_warm",
+      "to": "shot_closeup",
+      "relation": "温情常用特写"
+    },
+    {
+      "from": "shot_closeup",
+      "to": "camera_push",
+      "relation": "特写常配推镜"
+    },
+    {
+      "from": "struct_open",
+      "to": "shot_wide",
+      "relation": "开场用远景"
+    },
+    {
+      "from": "struct_close",
+      "to": "shot_wide",
+      "relation": "收尾用空镜"
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+# Web 端唯一额外依赖（拼接用 ffmpeg）。其余依赖都在 clora 环境里。
+imageio-ffmpeg
