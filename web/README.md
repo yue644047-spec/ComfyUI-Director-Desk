@@ -13,7 +13,7 @@
 ## 前置条件
 
 - ComfyUI 已运行在 `http://127.0.0.1:8188`（MiniMax H3 模型已下载，见 skill 的 references/workflow.md）
-- 参考图/自动匹配素材（抽主体作参考）：`diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors` + `background_removal/birefnet.safetensors`，用 `download_ref2va_birefnet.py` 下载
+- 参考图/自动匹配素材（抽主体作参考）：`diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors` + `background_removal/birefnet.safetensors`
 - clora 环境：`D:\ProgramData\anaconda3\envs\clora\python.exe`（torch 2.11+cu130）
 - 自定义节点 ComfyUI-KJNodes（提供 Sage 补丁节点）
 - `imageio-ffmpeg`（pip install imageio-ffmpeg，拼接用）
@@ -21,8 +21,6 @@
 - 本地 AI 拆分镜：同一台 Ollama 有对话模型（默认 qwen3:8b）时，「解析分镜」优先用它拆镜并补景别/光线描述；没有对话模型或调用失败时自动回退格式规则拆分，不中断
 
 ## 启动
-
-双击 `run.bat`，或：
 
 ```
 D:\ProgramData\anaconda3\envs\clora\python.exe web\app.py
@@ -59,6 +57,5 @@ web/
 │   ├── index.html      前端页面
 │   └── app.js          前端逻辑
 ├── requirements.txt
-├── run.bat
 └── README.md
 ```

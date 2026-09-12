@@ -23,7 +23,7 @@
 - **项目层**：多项目管理（首页 home.html 项目选择 + 按项目隔离 state 数据）
 - **数据层**：自动保存（0.8s 防抖）、素材库（`assets\` 只收图片素材，上传/打标签，生成产物不入库）、素材检索
   - 素材存储：MySQL `comfyui_assets`（事实/自增 id/使用信息/匹配流水）+ Neo4j（按 id 建 Asset-Tag-FITS 图，图算法检索）；素材匹配用 Ollama bge-m3 向量余弦相似度，任一依赖不可用自动回退本地 JSON/规则打分
-- **输出层**：逐镜预览、批量生成、拼接 + drawtext 字幕、镜头间过渡补帧（bridge_and_concat.py）、工作流导出（按模型分文件）
+- **输出层**：逐镜预览、批量生成、拼接 + drawtext 字幕、镜头间过渡补帧、工作流导出（按模型分文件）
 
 ## 模型管线
 
@@ -60,7 +60,6 @@ D:\ProgramData\anaconda3\envs\clora\python.exe web\app.py > director.log 2>&1
 ```
 ├── web/                       导演台本体（纯标准库后端 + 原生 JS 前端）
 │   ├── app.py                 后端（http.server，零第三方依赖）
-│   ├── bridge_and_concat.py   镜头间过渡补帧 + 拼接
 │   ├── _mcp_http.py           modao MCP 客户端（脚本辅助，可选）
 │   ├── script_graph.json      景别/运镜知识图谱数据
 │   └── static/                home.html（项目选择）+ index.html + app.js + 本地 vendor（Tailwind/Iconify/Cytoscape）
@@ -68,8 +67,7 @@ D:\ProgramData\anaconda3\envs\clora\python.exe web\app.py > director.log 2>&1
 ├── migration/                 内网迁移：环境安装 + 启动 + 增量打包 + Ollama 离线打包脚本（不含 clora_env.tar.gz 大包）
 ├── 技术架构.md                系统全景解析（改系统前先看）
 ├── 迭代手册.md                恢复现场 / 日常改动 / 模型管理 / 内网迁移
-├── download_wan22_14b.py      模型下载模板（huggingface 直连 + Range 断点续传）
-└── run_h3.bat / stop_comfyui.bat   启动/停止快捷脚本
+└── stop_comfyui.bat           停止快捷脚本
 ```
 
 ## 数据与密钥
@@ -88,7 +86,6 @@ D:\ProgramData\anaconda3\envs\clora\python.exe web\app.py > director.log 2>&1
 - 拼接：imageio-ffmpeg 本地二进制 + drawtext 字幕
 - 可选：DeepSeek（剧本）、Qwen-VL（素材标签）、Neo4j（本地知识图谱）
 - 本地 AI：Ollama（`qwen3:8b` 拆镜 + `bge-m3` 素材向量匹配），全离线，缺失自动回退
-- 模型下载：ModelScope 主源 + huggingface 备用，断点续传 + 单实例锁 + .part 保护
 
 ## 维护
 
