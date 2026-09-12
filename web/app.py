@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""script-to-video 导演台后端（纯标准库，无第三方依赖）。
+"""script-to-video 导演台后端（标准库 + 可选 jieba 分词；向量相似度走本机 Ollama bge-m3）。
 
 导演台模式：分镜表携带导演参数（景别/运镜/比例/步数/种子），
 后端负责把它们折叠进最终提示词，并提交 ComfyUI 生成。
@@ -13,10 +13,15 @@
   POST /api/generate       单镜生成（提交 ComfyUI 并轮询）
   POST /api/concat         合成 + 字幕
 """
-import base64, io, json, os, random, re, shutil, subprocess, sys, threading, time, urllib.request, urllib.error, zipfile, uuid
+import base64, io, json, math, os, random, re, shutil, subprocess, sys, threading, time, urllib.request, urllib.error, zipfile, uuid
 from collections import deque
 from urllib.parse import unquote, urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+try:
+    import jieba
+except ImportError:
+    jieba = None
 
 
 def _load_env():
@@ -47,9 +52,12 @@ INPUT_DIR = os.environ.get("INPUT_DIR", os.path.join(_COMFY_ROOT, "input"))
 ASSETS_DIR = os.environ.get("ASSETS_DIR", os.path.join(_COMFY_ROOT, "assets"))
 FONT = os.environ.get("FONT", "C:/Windows/Fonts/simhei.ttf")
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+PROJECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects")
+CURRENT_PROJECT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "current_project.json")
 
 MODELS = {
     "unet": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "unet_ref2va": "minimax_h3_ref2va_pruned_fp8_scaled.safetensors",
     "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
     "vae_video": "minimax_h3_video_vae_fp16.safetensors",
     "vae_audio": "minimax_h3_audio_vae_fp32.safetensors",
@@ -63,6 +71,7 @@ RESOLUTIONS = {"480p": 480, "720p": 720, "1080p": 1080, "2K": 1440, "4K": 2160}
 STYLE_SUFFIX = "电影质感，真实实拍风格，无字幕无水印。"
 MODES = {"标准": {"steps": 25, "turbo": False}, "均衡": {"steps": 12, "turbo": False}, "高清": {"steps": 32, "turbo": False}, "极速": {"steps": 4, "turbo": True}}
 TURBO_LORA = "minimax_h3_turbo_4step_ema_ckpt850.safetensors"
+BG_REMOVAL_MODEL = "birefnet.safetensors"
 MODELS_WAN22 = {
     "unet": "wan2.2_ti2v_5B_fp16.safetensors",
     "clip": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
@@ -79,6 +88,14 @@ MODELS_WAN22_14B = {
     "vae": "wan_2.1_vae.safetensors",
 }
 WAN14_MODE_STEPS = {"标准": 20, "均衡": 20, "高清": 30, "极速": 10}
+MODELS_WAN22_S2V = {
+    "unet": "wan2.2_s2v_14B_fp8_scaled.safetensors",
+    "clip": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    "vae": "wan_2.1_vae.safetensors",
+    "audio_encoder": "wav2vec2_large_english_fp16.safetensors",
+}
+S2V_MODE_STEPS = {"标准": 10, "均衡": 10, "高清": 15, "极速": 6}
+S2V_CHUNK = 77  # Wan2.2 S2V 官方分块帧数（16fps，每块约 4.8 秒）
 
 
 # 时长(秒) -> 帧数
@@ -111,13 +128,23 @@ def compose_prompt(scene):
         prompt = prompt[:-1]
     shot = scene.get("shot") or "中景"
     camera = scene.get("camera") or "固定镜头"
-    neg = (scene.get("negative_prompt") or "").strip()
+    neg = (scene.get("global_negative_prompt") or "").strip()
+    shot_neg = (scene.get("negative_prompt") or "").strip()
+    if neg and shot_neg:
+        neg = neg + "，" + shot_neg
+    elif shot_neg:
+        neg = shot_neg
     char = scene.get("character") or {}
     char_desc = (char.get("description") or "").strip()
     char_name = (char.get("name") or "").strip()
+    sc = scene.get("scene") or {}
+    scene_desc = (sc.get("description") or "").strip()
+    scene_name = (sc.get("name") or "").strip()
     segs = []
     if char_desc:
         segs.append("角色（全程固定同一人）：" + (char_name + "，" if char_name else "") + char_desc)
+    if scene_desc:
+        segs.append("场景（全程固定同一场景）：" + (scene_name + "，" if scene_name else "") + scene_desc)
     if prompt:
         segs.append(prompt)
     segs.append("景别：" + shot)
@@ -131,6 +158,7 @@ def compose_prompt(scene):
 def prepare_scene(scene):
     """补全默认值、解析几何、计算帧数、折叠提示词。"""
     s = dict(scene)
+    had_steps = bool(s.get("steps"))
     s.setdefault("shot", "中景")
     s.setdefault("camera", "固定镜头")
     s.setdefault("aspect", "16:9")
@@ -140,6 +168,7 @@ def prepare_scene(scene):
     s.setdefault("negative_prompt", "")
     s.setdefault("model", "MiniMax H3")
     s.setdefault("guides", [])
+    s.setdefault("need_audio", True)
     s["seconds"] = max(3, min(15, int(s.get("seconds") or 5)))
     if s["model"] == "Wan2.2 14B":
         s["length"] = s["seconds"] * 16 + 1
@@ -147,6 +176,11 @@ def prepare_scene(scene):
     elif s["model"] == "Wan2.2 5B":
         s["length"] = s["seconds"] * 16 + 1
         s["width"], s["height"] = resolve_geometry(s, snap=32)
+    elif s["model"] == "Wan2.2 S2V":
+        s["length"] = max(S2V_CHUNK, int(s["seconds"] * 16))
+        s["width"], s["height"] = resolve_geometry(s, snap=16)
+        if not had_steps:
+            s["steps"] = S2V_MODE_STEPS.get(s.get("mode") or "标准", 10)
     else:
         s["length"] = seconds_to_length(s["seconds"])
         s["width"], s["height"] = resolve_geometry(s)
@@ -165,6 +199,8 @@ def build_graph(scene):
         return build_graph_wan22(scene)
     if scene.get("model") == "Wan2.2 14B":
         return build_graph_wan22_14b(scene)
+    if scene.get("model") == "Wan2.2 S2V":
+        return build_graph_wan22_s2v(scene)
     return build_graph_h3(scene)
 
 
@@ -196,7 +232,7 @@ def build_graph_wan22(scene):
         graph["6"] = {"class_type": "LoadImage", "inputs": {"image": first_frame}}
         graph["7"]["inputs"]["start_image"] = ["6", 0]
     voice = scene.get("voice")
-    if voice:
+    if voice and scene.get("need_audio", True):
         graph["13"] = {"class_type": "LoadAudio", "inputs": {"audio": voice}}
         graph["11"]["inputs"]["audio"] = ["13", 0]
     return graph
@@ -241,10 +277,71 @@ def build_graph_wan22_14b(scene):
     graph["14"] = {"class_type": "CreateVideo", "inputs": {"images": ["13", 0], "fps": 16.0}}
     graph["15"] = {"class_type": "SaveVideo", "inputs": {"video": ["14", 0], "filename_prefix": prefix, "format": "auto"}}
     voice = scene.get("voice")
-    if voice:
+    if voice and scene.get("need_audio", True):
         graph["16"] = {"class_type": "LoadAudio", "inputs": {"audio": voice}}
         graph["14"]["inputs"]["audio"] = ["16", 0]
     return graph
+
+
+def build_graph_wan22_s2v(scene):
+    """Wan2.2 S2V 语音生视频：LoadAudio → wav2vec2 → WanSoundImageToVideo(+Extend 分块) → KSampler → 解码，16fps 合入原声。"""
+    prompt = scene["prompt"]
+    width = scene.get("width", 832)
+    height = scene.get("height", 480)
+    length = int(scene.get("length") or S2V_CHUNK)
+    n_chunks = max(1, math.ceil(length / S2V_CHUNK))
+    seed = scene.get("seed") or random.randrange(0, 2 ** 31)
+    mode = scene.get("mode") or "标准"
+    steps = int(scene.get("steps") or S2V_MODE_STEPS.get(mode, 10))
+    neg = (scene.get("negative_prompt") or "").strip() or WAN_DEFAULT_NEGATIVE
+    prefix = scene.get("prefix", "video/wan22_s2v")
+    voice = scene.get("voice")
+    if not voice:
+        raise ValueError("Wan2.2 S2V 需要说话语音：请先在镜头卡片「上传配音」传一段人声（语音驱动画面）")
+    graph = {
+        "1": {"class_type": "CLIPLoader", "inputs": {"clip_name": MODELS_WAN22_S2V["clip"], "type": "wan", "device": "default"}},
+        "2": {"class_type": "VAELoader", "inputs": {"vae_name": MODELS_WAN22_S2V["vae"]}},
+        "3": {"class_type": "UNETLoader", "inputs": {"unet_name": MODELS_WAN22_S2V["unet"], "weight_dtype": "default"}},
+        "4": {"class_type": "AudioEncoderLoader", "inputs": {"audio_encoder_name": MODELS_WAN22_S2V["audio_encoder"]}},
+        "5": {"class_type": "LoadAudio", "inputs": {"audio": voice}},
+        "6": {"class_type": "AudioEncoderEncode", "inputs": {"audio_encoder": ["4", 0], "audio": ["5", 0]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 0]}},
+        "8": {"class_type": "CLIPTextEncode", "inputs": {"text": neg, "clip": ["1", 0]}},
+        "9": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["3", 0], "shift": 8.0}},
+    }
+    ref = scene.get("first_frame")
+    if ref:
+        graph["10"] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+    base = {"class_type": "WanSoundImageToVideo", "inputs": {"positive": ["7", 0], "negative": ["8", 0], "vae": ["2", 0], "width": width, "height": height, "length": S2V_CHUNK, "batch_size": 1, "audio_encoder_output": ["6", 0]}}
+    if ref:
+        base["inputs"]["ref_image"] = ["10", 0]
+    graph["11"] = base
+    graph["12"] = {"class_type": "KSampler", "inputs": {"model": ["9", 0], "positive": ["11", 0], "negative": ["11", 1], "latent_image": ["11", 2], "seed": seed, "steps": steps, "cfg": 6.0, "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0}}
+    latent = ["12", 0]
+    for i in range(1, n_chunks):
+        eid, kid = str(11 + 2 * i), str(12 + 2 * i)
+        ext = {"class_type": "WanSoundImageToVideoExtend", "inputs": {"positive": ["7", 0], "negative": ["8", 0], "vae": ["2", 0], "length": S2V_CHUNK, "video_latent": latent, "audio_encoder_output": ["6", 0]}}
+        if ref:
+            ext["inputs"]["ref_image"] = ["10", 0]
+        graph[eid] = ext
+        graph[kid] = {"class_type": "KSampler", "inputs": {"model": ["9", 0], "positive": [eid, 0], "negative": [eid, 1], "latent_image": [eid, 2], "seed": seed + 7 * i, "steps": steps, "cfg": 6.0, "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0}}
+        latent = [kid, 0]
+    vid, cid, sid = str(11 + 2 * n_chunks), str(12 + 2 * n_chunks), str(13 + 2 * n_chunks)
+    graph[vid] = {"class_type": "VAEDecode", "inputs": {"samples": latent, "vae": ["2", 0]}}
+    graph[cid] = {"class_type": "CreateVideo", "inputs": {"images": [vid, 0], "fps": 16.0, "audio": ["5", 0]}}
+    graph[sid] = {"class_type": "SaveVideo", "inputs": {"video": [cid, 0], "filename_prefix": prefix, "format": "auto"}}
+    return graph
+
+
+def _build_ref_prompt(prompt, n):
+    """参考图挂成 <Subject N>/<Picture N>：模型从图里抽取主体身份，而不是把图当关键帧。"""
+    subs = "\n".join("<Subject %d> is the subject shown in <Picture %d>." % (i, i) for i in range(1, n + 1))
+    rets = "\n".join("<Subject %d> (appears in [Shot 1]): fully_preserved - the identity and appearance of <Subject %d> are retained." % (i, i) for i in range(1, n + 1))
+    follows = " and ".join("<Subject %d>" % i for i in range(1, n + 1))
+    return ("subject_definitions:\n" + subs + "\n\n"
+            "summary: [reference generation] the target video keeps " + follows + " consistent.\n\n"
+            "retention_analysis:\n" + rets + "\n\n"
+            "detailed_description: [Shot 1] " + prompt)
 
 
 def build_graph_h3(scene):
@@ -257,42 +354,66 @@ def build_graph_h3(scene):
     steps = scene.get("steps") or mode_cfg["steps"]
     turbo = bool(mode_cfg.get("turbo"))
     prefix = scene.get("prefix", "video/script2video")
+    refs = (scene.get("guides") or []) + (scene.get("auto_guides") or [])
+    need_audio = bool(scene.get("need_audio", True))
+
     graph = {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": MODELS["unet"], "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": MODELS["clip"], "type": "minimax", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": MODELS["vae_video"]}},
-        "4": {"class_type": "VAELoader", "inputs": {"vae_name": MODELS["vae_audio"]}},
-        "5": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "width": width, "height": height, "length": length}},
-        "15": {"class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch", "inputs": {"model": ["16" if turbo else "1", 0]}},
-        "6": {"class_type": "BasicGuider", "inputs": {"model": ["15", 0], "conditioning": ["5", 0]}},
-        "7": {"class_type": "BasicScheduler", "inputs": {"model": ["15", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
-        "8": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
-        "9": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
-        "10": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["9", 0], "guider": ["6", 0], "sampler": ["8", 0], "sigmas": ["7", 0], "latent_image": ["5", 1]}},
-        "11": {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["3", 0]}},
-        "12": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["10", 0], "vae": ["4", 0]}},
-        "13": {"class_type": "CreateVideo", "inputs": {"images": ["11", 0], "fps": 24.0, "audio": ["12", 0]}},
-        "14": {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": prefix, "format": "auto"}},
     }
-    if turbo:
-        graph["16"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": TURBO_LORA, "strength_model": 1.0}}
-    first_frame = scene.get("first_frame")
-    if first_frame:
-        graph["17"] = {"class_type": "LoadImage", "inputs": {"image": first_frame}}
-        graph["5"]["inputs"]["first_frame"] = ["17", 0]
-    guides = scene.get("guides") or []
-    if guides:
-        cond_src, latent_src = ["5", 0], ["5", 1]
-        n = len(guides)
-        for i, g in enumerate(guides):
-            lnid, nid = str(19 + i * 2), str(20 + i * 2)
-            frame_idx = max(1, min(int(length) - 1, round(int(length) * (i + 1) / (n + 1))))
+    if need_audio:
+        graph["4"] = {"class_type": "VAELoader", "inputs": {"vae_name": MODELS["vae_audio"]}}
+    if refs:
+        graph["1"] = {"class_type": "UNETLoader", "inputs": {"unet_name": MODELS["unet_ref2va"], "weight_dtype": "default"}}
+        graph["15"] = {"class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch", "inputs": {"model": ["1", 0]}}
+        graph["16"] = {"class_type": "MiniMaxH3SigmaShift", "inputs": {"model": ["15", 0], "shift_video": 12.0, "shift_audio": 3.0}}
+        h3_5 = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+            "clip": ["2", 0], "vae": ["3", 0],
+            "prompt": _build_ref_prompt(prompt, len(refs)),
+            "width": width, "height": height, "length": length, "ref_image_size": "match"}}
+        if need_audio:
+            h3_5["inputs"]["audio_vae"] = ["4", 0]
+        graph["5"] = h3_5
+        graph["30"] = {"class_type": "LoadBackgroundRemovalModel", "inputs": {"bg_removal_name": BG_REMOVAL_MODEL}}
+        nid = 40
+        for i, g in enumerate(refs, 1):
+            lnid, mnid, szid, smid, mtid, cnid = [str(nid + k) for k in range(6)]
+            nid += 6
             graph[lnid] = {"class_type": "LoadImage", "inputs": {"image": g}}
-            graph[nid] = {"class_type": "MiniMaxH3AddGuide", "inputs": {"positive": cond_src, "latent": latent_src, "vae": ["3", 0], "image": [lnid, 0], "frame_idx": frame_idx}}
-            cond_src = [nid, 0]
-        graph["6"]["inputs"]["conditioning"] = cond_src
+            graph[mnid] = {"class_type": "RemoveBackground", "inputs": {"bg_removal_model": ["30", 0], "image": [lnid, 0]}}
+            graph[szid] = {"class_type": "GetImageSize", "inputs": {"image": [lnid, 0]}}
+            graph[smid] = {"class_type": "SolidMask", "inputs": {"value": 1.0, "width": [szid, 0], "height": [szid, 1]}}
+            graph[mtid] = {"class_type": "MaskToImage", "inputs": {"mask": [smid, 0]}}
+            graph[cnid] = {"class_type": "ImageCompositeMasked", "inputs": {"destination": [mtid, 0], "source": [lnid, 0], "x": 0, "y": 0, "resize_source": False, "mask": [mnid, 0]}}
+            graph["5"]["inputs"]["ref_image_%d" % i] = [cnid, 0]
+        model_src = ["16", 0]
+        steps = max(12, int(steps))
+    else:
+        graph["1"] = {"class_type": "UNETLoader", "inputs": {"unet_name": MODELS["unet"], "weight_dtype": "default"}}
+        graph["5"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "width": width, "height": height, "length": length}}
+        graph["15"] = {"class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch", "inputs": {"model": ["16" if turbo else "1", 0]}}
+        if turbo:
+            graph["16"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": TURBO_LORA, "strength_model": 1.0}}
+        first_frame = scene.get("first_frame")
+        if first_frame:
+            graph["17"] = {"class_type": "LoadImage", "inputs": {"image": first_frame}}
+            graph["5"]["inputs"]["first_frame"] = ["17", 0]
+        model_src = ["15", 0]
+
+    graph["6"] = {"class_type": "BasicGuider", "inputs": {"model": model_src, "conditioning": ["5", 0]}}
+    graph["7"] = {"class_type": "BasicScheduler", "inputs": {"model": model_src, "scheduler": "simple", "steps": steps, "denoise": 1.0}}
+    graph["8"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}}
+    graph["9"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}}
+    graph["10"] = {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["9", 0], "guider": ["6", 0], "sampler": ["8", 0], "sigmas": ["7", 0], "latent_image": ["5", 1]}}
+    graph["11"] = {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["3", 0]}}
+    video_inputs = {"images": ["11", 0], "fps": 24.0}
+    if need_audio:
+        graph["12"] = {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["10", 0], "vae": ["4", 0]}}
+        video_inputs["audio"] = ["12", 0]
+    graph["13"] = {"class_type": "CreateVideo", "inputs": video_inputs}
+    graph["14"] = {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": prefix, "format": "auto"}}
     voice = scene.get("voice")
-    if voice:
+    if voice and need_audio:
         graph["18"] = {"class_type": "LoadAudio", "inputs": {"audio": voice}}
         graph["13"]["inputs"]["audio"] = ["18", 0]
     return graph
@@ -330,7 +451,7 @@ def _is_widget(tspec):
     return True
 
 
-def _input_specs(info):
+def _input_specs(info, pin=None):
     inp = info.get("input") or {}
     for section in ("required", "optional"):
         for name, spec in (inp.get(section) or {}).items():
@@ -339,6 +460,23 @@ def _input_specs(info):
                 opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
             else:
                 tspec, opts = spec, {}
+            if tspec == "COMFY_AUTOGROW_V3":
+                tmpl = (opts or {}).get("template") or {}
+                prefix = tmpl.get("prefix", "")
+                inner = (tmpl.get("input") or {}).get("required") or {}
+                itype = "IMAGE"
+                if inner:
+                    raw = next(iter(inner.values()), None)
+                    if isinstance(raw, (list, tuple)) and raw:
+                        raw = raw[0]
+                    itype = str(raw or "IMAGE").strip() or "IMAGE"
+                if pin is not None:
+                    keys = sorted((k for k in pin if k.startswith(prefix) and k[len(prefix):].isdigit()), key=lambda k: (len(k), k))
+                    for k in keys:
+                        yield k, itype, {}, section == "optional"
+                else:
+                    yield name, tspec, opts, section == "optional"
+                continue
             yield name, tspec, opts, section == "optional"
 
 
@@ -379,7 +517,7 @@ def graph_to_ui(graph):
         info = oi.get(ctype) or {}
         pin = pn.get("inputs") or {}
         inputs_arr, widgets_values = [], []
-        for name, tspec, opts, _opt in _input_specs(info):
+        for name, tspec, opts, _opt in _input_specs(info, pin):
             pv = pin.get(name, _MISSING)
             if _classify(tspec, pv) == "link":
                 inputs_arr.append({"name": name, "type": _link_type_str(tspec), "link": None})
@@ -402,7 +540,7 @@ def graph_to_ui(graph):
         pin = pn.get("inputs") or {}
         node = nodes[i]
         input_index = {inp["name"]: j for j, inp in enumerate(node["inputs"])}
-        for name, _tspec, _opts, _opt in _input_specs(info):
+        for name, _tspec, _opts, _opt in _input_specs(info, pin):
             pv = pin.get(name, _MISSING)
             if not (isinstance(pv, list) and len(pv) == 2 and isinstance(pv[0], str) and isinstance(pv[1], int)):
                 continue
@@ -469,9 +607,13 @@ def _get(url):
 
 def generate_scene(scene):
     """scene 需已 prepare。提交生成并轮询，返回输出文件名（相对 output 目录）。"""
-    graph = build_graph(scene)
+    try:
+        graph = build_graph(scene)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     base = COMFY_URL.rstrip("/")
-    save_workflow_files(graph, "Director_最新镜头_" + ("Wan22" if scene.get("model") == "Wan2.2 5B" else "H3"))
+    suffix = {"Wan2.2 5B": "Wan22", "Wan2.2 S2V": "S2V"}.get(scene.get("model"), "H3")
+    save_workflow_files(graph, "Director_最新镜头_" + suffix)
     r = _post(base + "/prompt", {"prompt": graph, "client_id": "web"})
     pid = r["prompt_id"]
     deadline = time.time() + scene.get("timeout", 1800)
@@ -512,41 +654,6 @@ def _ffmpeg():
         return "ffmpeg"
 
 
-def concat_scenes(clips, subtitles):
-    """clips: 绝对路径列表; subtitles: [{text,start,end,fontsize,position}]"""
-    ff = _ffmpeg()
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    final = os.path.join(OUTPUT_DIR, "script2video_final_" + time.strftime("%Y%m%d_%H%M%S") + ".mp4")
-    listfile = os.path.join(OUTPUT_DIR, "_concat_list.txt")
-    NL = chr(10)
-    with open(listfile, "w", encoding="utf-8") as f:
-        for c in clips:
-            f.write("file '" + os.path.abspath(c).replace(os.sep, "/") + "'" + NL)
-    tmp = final + ".concat.mp4"
-    subprocess.run([ff, "-y", "-f", "concat", "-safe", "0", "-i", listfile, "-c", "copy", tmp], check=True, capture_output=True)
-    vf_parts = []
-    BS = chr(92)
-    for s in subtitles:
-        text = s["text"].replace(":", BS + ":").replace("'", BS + "'")
-        pos = s.get("position", "bottom")
-        y = "(h-text_h)/2" if pos == "center" else "h-150"
-        vf_parts.append(
-            "drawtext=fontfile='" + FONT.replace(":", BS + ":") + "':text='" + text + "':"
-            "fontcolor=white:fontsize=" + str(s.get("fontsize", 40)) + ":borderw=2:bordercolor=black:"
-            "x=(w-text_w)/2:y=" + y + ":enable='between(t," + str(s["start"]) + "," + str(s["end"]) + ")'"
-        )
-    cmd = [ff, "-y", "-i", tmp, "-c:v", "libx264", "-crf", "18", "-c:a", "copy"]
-    if vf_parts:
-        cmd += ["-vf", ",".join(vf_parts)]
-    cmd.append(final)
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        return {"ok": False, "error": r.stderr[-800:]}
-    os.remove(listfile)
-    os.remove(tmp)
-    return {"ok": True, "file": os.path.basename(final)}
-
-
 def list_assets():
     """列出素材库（assets 目录）下的图片素材；生成产物（output）不属于素材库。"""
     base = os.path.abspath(ASSETS_DIR)
@@ -566,41 +673,66 @@ def list_assets():
 
 
 def _sync_asset_stores(assets):
-    """素材索引同步（30s 节流）：MySQL 事实表（自增 id）→ Neo4j 按 id 建 Asset/Tag 图。"""
+    """素材索引同步（30s 节流）：MySQL 事实表与 Neo4j Asset/Tag 图（id 取文件名主干）。"""
     global _LAST_ASSET_SYNC
     now = time.time()
     if now - _LAST_ASSET_SYNC < 30:
         return
     tags = _load_json(TAGS_FILE, {})
-    if not _mysql_ensure():
-        _LAST_ASSET_SYNC = now
-        return
-    rows = []
-    for a in assets:
-        rows.append("(%s,%s,%d,%d,%s,'manual')" % (_sql_quote(a["path"]), _sql_quote(a["name"]), int(a.get("size") or 0), int(a.get("mtime") or 0), _sql_quote(tags.get(a.get("path"), ""))))
-    if rows:
-        ok, _ = _mysql_run("INSERT INTO assets (path,name,size,mtime,tags,source) VALUES " + ",".join(rows) + " ON DUPLICATE KEY UPDATE name=VALUES(name),size=VALUES(size),mtime=VALUES(mtime)")
-    else:
-        ok = True
-    if not ok:
-        _LAST_ASSET_SYNC = now
-        return
-    paths = ",".join(_sql_quote(a["path"]) for a in assets)
-    _mysql_run("DELETE FROM assets WHERE path NOT IN (%s)" % (paths or "''"))
-    ok2, out = _mysql_run("SELECT id,path,name,tags FROM assets")
+    ok2 = False
+    if _mysql_ensure():
+        rows = []
+        for a in assets:
+            rows.append("(%s,%s,%d,%d,%s,'manual')" % (_sql_quote(a["path"]), _sql_quote(a["name"]), int(a.get("size") or 0), int(a.get("mtime") or 0), _sql_quote(tags.get(a.get("path"), ""))))
+        if rows:
+            ok, _ = _mysql_run("INSERT INTO assets (path,name,size,mtime,tags,source) VALUES " + ",".join(rows) + " ON DUPLICATE KEY UPDATE name=VALUES(name),size=VALUES(size),mtime=VALUES(mtime)")
+        else:
+            ok = True
+        if ok:
+            paths = ",".join(_sql_quote(a["path"]) for a in assets)
+            _mysql_run("DELETE FROM assets WHERE path NOT IN (%s)" % (paths or "''"))
+            ok2, out = _mysql_run("SELECT path,name,tags FROM assets")
     if ok2:
         g_rows = []
         for line in out.splitlines():
-            parts = line.split("\t", 3)
-            if len(parts) >= 4 and parts[1]:
-                g_rows.append({"id": int(parts[0]) if parts[0].isdigit() else None, "path": parts[1], "name": parts[2], "tags": parts[3]})
-        _neo4j_index_assets(g_rows)
+            parts = line.split("\t", 2)
+            if len(parts) >= 3 and parts[0]:
+                g_rows.append({"path": parts[0], "name": parts[1], "tags": parts[2]})
+    else:
+        g_rows = [{"path": a["path"], "name": a["name"], "tags": tags.get(a.get("path"), "")} for a in assets]
+    _neo4j_index_assets(g_rows)
     _LAST_ASSET_SYNC = now
 
 
 def resolve_asset_path(rel):
     """把素材相对路径解析为绝对路径，并做包含性校验。"""
     base = os.path.abspath(ASSETS_DIR)
+    p = os.path.abspath(os.path.join(base, (rel or "").replace("/", os.sep)))
+    if p != base and not p.startswith(base + os.sep):
+        raise ValueError("非法路径")
+    return p
+
+
+def list_outputs():
+    """列出保存区（OUTPUT_DIR）下的成片/镜头视频；跳过智能合成的桥接过渡帧等中间产物。"""
+    base = os.path.abspath(OUTPUT_DIR)
+    exts = (".mp4", ".webm", ".mov", ".mkv", ".avi")
+    out = []
+    if os.path.isdir(base):
+        for root, _dirs, files in os.walk(base):
+            for f in files:
+                if f.lower().endswith(exts) and not f.startswith(("bridge_", "_")):
+                    full = os.path.join(root, f)
+                    rel = os.path.relpath(full, base).replace(os.sep, "/")
+                    st = os.stat(full)
+                    out.append({"name": f, "path": rel, "size": st.st_size, "mtime": int(st.st_mtime)})
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out
+
+
+def resolve_output_path(rel):
+    """把保存区相对路径解析为绝对路径，并做包含性校验。"""
+    base = os.path.abspath(OUTPUT_DIR)
     p = os.path.abspath(os.path.join(base, (rel or "").replace("/", os.sep)))
     if p != base and not p.startswith(base + os.sep):
         raise ValueError("非法路径")
@@ -864,8 +996,13 @@ def ensure_knowledge_graph():
         d.close()
 
 
+def _asset_graph_id(path):
+    """Asset 节点 id：素材文件名主干（XX_time 结构），不依赖 MySQL 自增 id。"""
+    return os.path.splitext(os.path.basename(path or ""))[0]
+
+
 def _neo4j_index_assets(rows, prune=True):
-    """素材入图：Asset 节点以 MySQL 自增 id 为主键，标签拆 Tag 节点连 HAS_TAG；
+    """素材入图：Asset 以 path 唯一、id 取文件名主干（XX_time），标签拆 Tag 节点连 HAS_TAG；
     prune=True 时移除已不在素材库的节点（全量同步用，单条更新必须传 False）。"""
     d = _neo4j_driver()
     if not d:
@@ -875,14 +1012,15 @@ def _neo4j_index_assets(rows, prune=True):
             if prune:
                 s.run("MATCH (a:Asset) WHERE NOT a.path IN $paths DETACH DELETE a", paths=[r["path"] for r in rows])
             for r in rows:
-                aid = r.get("id")
-                if aid is None:
+                p = r["path"]
+                gid = _asset_graph_id(p)
+                if not gid:
                     continue
-                s.run("MERGE (a:Asset {id:$id}) SET a.path=$p, a.name=$n", id=int(aid), p=r["path"], n=r.get("name") or "")
+                s.run("MERGE (a:Asset {path:$p}) SET a.id=$id, a.name=$n", p=p, id=gid, n=r.get("name") or os.path.basename(p))
                 for t in re.split(r"[,，|。:：]+", (r.get("tags") or "").strip()):
                     t = t.strip()
                     if t:
-                        s.run("MERGE (t:Tag {name:$t}) WITH t MATCH (a:Asset {id:$id}) MERGE (a)-[:HAS_TAG]->(t)", t=t, id=int(aid))
+                        s.run("MATCH (a:Asset {path:$p}) MERGE (t:Tag {name:$t}) MERGE (a)-[:HAS_TAG]->(t)", p=p, t=t)
     except Exception:
         pass
     finally:
@@ -902,15 +1040,42 @@ def _neo4j_unindex_asset(path):
         d.close()
 
 
-def _neo4j_keyword_groups():
-    """读知识图谱各节点关键词分组，供自动匹配做语义扩展；失败返回 None。"""
+def _neo4j_read_asset_graph():
+    """素材图谱：Asset（XX_time id）与 Tag 节点、HAS_TAG/FITS 关系，供图谱面板素材视图展示。"""
+    d = _neo4j_driver()
+    if not d:
+        return {"nodes": [], "edges": []}
+    try:
+        with d.session() as s:
+            assets = s.run("MATCH (a:Asset) RETURN a.id AS id, a.path AS path, a.name AS name").data()
+            tags = s.run("MATCH (t:Tag) RETURN t.name AS name").data()
+            has_tag = s.run("MATCH (a:Asset)-[:HAS_TAG]->(t:Tag) RETURN a.id AS aid, t.name AS tag").data()
+            fits = s.run("MATCH (a:Asset)-[:FITS]->(k:KGNode) RETURN a.id AS aid, k.id AS kid, k.label AS label").data()
+        nodes = [{"id": a["id"], "type": "asset", "label": a["id"], "path": a["path"], "name": a["name"]} for a in assets]
+        nodes += [{"id": "tag:" + t["name"], "type": "tag", "label": t["name"]} for t in tags]
+        for r in fits:
+            if not any(n["id"] == r["kid"] and n["type"] == "kg" for n in nodes):
+                nodes.append({"id": r["kid"], "type": "kg", "label": r["label"] or r["kid"]})
+        edges = [{"from": r["aid"], "to": "tag:" + r["tag"], "relation": "HAS_TAG"} for r in has_tag]
+        edges += [{"from": r["aid"], "to": r["kid"], "relation": "FITS" + ("·" + r["label"] if r["label"] else "")} for r in fits]
+        return {"nodes": nodes, "edges": edges}
+    except Exception:
+        return {"nodes": [], "edges": []}
+    finally:
+        d.close()
+
+
+def _neo4j_vocab():
+    """一次读齐自动匹配用词表：全部 Tag 名 + KGNode 关键词组；失败返回 None。"""
     d = _neo4j_driver()
     if not d:
         return None
     try:
         with d.session() as s:
-            rows = s.run("MATCH (n:KGNode) RETURN n.id AS id, n.keywords AS keywords, n.label AS label").data()
-        return {r["id"]: {"keywords": [str(k).lower() for k in (r.get("keywords") or [])], "label": r.get("label") or ""} for r in rows}
+            tags = [str(r["name"]).lower() for r in s.run("MATCH (t:Tag) RETURN t.name AS name").data()]
+            rows = s.run("MATCH (n:KGNode) RETURN n.id AS id, n.keywords AS keywords").data()
+        groups = {r["id"]: [str(k).lower() for k in (r.get("keywords") or [])] for r in rows}
+        return {"tags": tags, "groups": groups}
     except Exception:
         return None
     finally:
@@ -1090,9 +1255,8 @@ def tag_asset_with_ai(path, api_key=None, base_url=None, model=None, prompt=None
             json.dump(data, open(TAGS_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         except Exception:
             pass
-        aid = _mysql_set_asset(path, os.path.basename(path), tags=tags, source="manual")
-        if aid is not None:
-            _neo4j_index_assets([{"id": aid, "path": path, "name": os.path.basename(path), "tags": tags}], prune=False)
+        _mysql_set_asset(path, os.path.basename(path), tags=tags, source="manual")
+        _neo4j_index_assets([{"path": path, "name": os.path.basename(path), "tags": tags}], prune=False)
         return {"ok": True, "tags": tags}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -1113,51 +1277,120 @@ def search_assets(q):
     return result
 
 
+_TAG_SPLIT = re.compile(r"[,，|。:：;；/\s]+")
+_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+_BGE_MODEL = os.environ.get("BGE_MODEL", "bge-m3:latest")
+_BGE_COS_MIN = float(os.environ.get("BGE_COS_MIN", "0.45"))
+_OLLAMA_CHAT_MODEL = os.environ.get("OLLAMA_CHAT_MODEL", "qwen3:8b")
+AI_SPLIT_MAX_CHARS = int(os.environ.get("AI_SPLIT_MAX_CHARS", "6000"))
+AI_SPLIT_TIMEOUT = int(os.environ.get("AI_SPLIT_TIMEOUT", "900"))
+_AI_MODEL = ""
+_OLLAMA_OK = True
+_OLLAMA_CHECKED = 0.0
+
+
+def _segment_prompt(prompt_text, vocab, tags_json):
+    """提示词分词：jieba 精确模式 + 图词典（Tag 名/KG 关键词/素材标签词），
+    保证「天安门广场」这类标签词整体切出；jieba 缺失时退回正则切分。"""
+    if jieba is not None:
+        words = []
+        if vocab:
+            words += [w for w in (vocab.get("tags") or []) if len(w) >= 2]
+            for gkws in (vocab.get("groups") or {}).values():
+                words += [w for w in (gkws or []) if len(w) >= 2]
+        for tag_text in (tags_json or {}).values():
+            words += [w for w in _TAG_SPLIT.split(str(tag_text).lower()) if len(w) >= 2]
+        for w in words:
+            jieba.add_word(w)
+        segs = jieba.lcut(prompt_text)
+    else:
+        segs = re.split(r"[^0-9a-z一-鿿]+", prompt_text)
+    return [w for w in segs if len(w) >= 2]
+
+
+def _bge_similarities(prompt, rows):
+    """bge-m3 批量算提示词与各素材标签文本的余弦相似度，返回 {path: cos}；Ollama 不可用返回 None。"""
+    global _OLLAMA_OK, _OLLAMA_CHECKED
+    texts = [((r.get("tags") or "").strip() + " " + (r.get("name") or "").split(".")[0]).strip() for r in rows]
+    pairs = [(r["path"], t) for r, t in zip(rows, texts) if t]
+    if not pairs:
+        return {}
+    if not _OLLAMA_OK and time.time() - _OLLAMA_CHECKED < 60:
+        return None
+    try:
+        req = urllib.request.Request(
+            _OLLAMA_URL + "/api/embed",
+            data=json.dumps({"model": _BGE_MODEL, "input": [prompt] + [t for _p, t in pairs], "keep_alive": "0"}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            embs = json.load(r)["embeddings"]
+
+        def cos(a, b):
+            d = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+            return sum(x * y for x, y in zip(a, b)) / (d or 1)
+
+        out = {}
+        for (p, _t), e in zip(pairs, embs[1:]):
+            out[p] = cos(embs[0], e)
+        _OLLAMA_OK = True
+        _OLLAMA_CHECKED = time.time()
+        return out
+    except Exception:
+        _OLLAMA_OK = False
+        _OLLAMA_CHECKED = time.time()
+        return None
+
+
 def auto_match_image(prompt):
-    """自动匹配素材图（图算法检索）：Neo4j 沿 提示词关键词→Tag→Asset 路径检索并计命中标签数，
-    叠加知识图谱语义扩展与文件名打分；每次调用写 MySQL 匹配流水（带素材 id），命中素材与镜头语义沉淀 FITS。
-    任一数据库不可用时回退本地目录/JSON，功能不中断。"""
+    """自动匹配素材图：jieba 分词（图词典对齐 Tag 词表）→ Neo4j 沿 提示词词→Tag→Asset 路径检索计命中数，
+    bge-m3 向量相似度做语义兜底，叠加知识图谱扩展与文件名打分取综合最高分；每次调用写 MySQL 匹配流水（带素材 id），
+    命中素材与镜头语义沉淀 FITS。任一环节不可用时回退规则打分，功能不中断。"""
     prompt_text = (prompt or "").lower()
     assets = list_assets()
     tags_json = _load_json(TAGS_FILE, {})
     rows = _mysql_load_assets()
     if rows is None:
         rows = [{"id": None, "path": a["path"], "name": a["name"], "tags": tags_json.get(a["path"], "")} for a in assets]
-    kws = [kw for kw in re.split(r"[^0-9a-z一-鿿]+", prompt_text) if len(kw) >= 2]
+    vocab = _neo4j_vocab()
+    kws = _segment_prompt(prompt_text, vocab, tags_json)
     extra_kws = []
     hit_nodes = []
-    groups = _neo4j_keyword_groups()
-    if groups:
-        for nid, g in groups.items():
-            gkws = g["keywords"]
+    if vocab:
+        for nid, gkws in (vocab.get("groups") or {}).items():
             if any(kw and kw in prompt_text for kw in gkws):
                 hit_nodes.append(nid)
                 for kw in gkws:
                     if kw and kw not in extra_kws:
                         extra_kws.append(kw)
     graph_hits = _neo4j_match_tags(kws)
+    sims = _bge_similarities(prompt_text, rows) if prompt_text else None
     best = None
     for r in rows:
-        score = 3 * int(graph_hits.get(r["path"], 0)) if graph_hits is not None else 0
+        path = r["path"]
+        score = 4 * int(graph_hits.get(path, 0)) if graph_hits is not None else 0
         stem = (r.get("name") or "").split(".")[0].lower()
         for kw in re.split(r"[^0-9a-z一-鿿]+", stem):
             if len(kw) >= 2 and kw in prompt_text:
                 score += 2
         tag_text = (r.get("tags") or "").lower()
         if graph_hits is None:
-            for kw in re.split(r"[,，|。:：]+", tag_text):
-                kw = kw.strip()
+            for kw in _TAG_SPLIT.split(tag_text):
                 if len(kw) >= 2 and kw in prompt_text:
-                    score += 3
+                    score += 4
         for kw in extra_kws:
             if kw and kw in tag_text:
                 score += 2
-        if score > 0 and (best is None or score > best[0]):
+        cosv = sims.get(path) if sims is not None else None
+        if cosv is not None:
+            score += 6 * cosv
+        hit = graph_hits is not None and graph_hits.get(path, 0) > 0
+        if score > 0 and (hit or cosv is None or cosv >= _BGE_COS_MIN) and (best is None or score > best[0]):
             best = (score, r)
     result = None
     if best:
         score, r = best
-        result = {"id": r.get("id"), "path": r["path"], "name": r["name"], "score": score, "tags": r.get("tags", "")}
+        result = {"id": r.get("id"), "path": r["path"], "name": r["name"], "score": round(score, 1), "tags": r.get("tags", "")}
         _neo4j_asset_fits(result["path"], hit_nodes)
     _mysql_log_match(prompt or "", result)
     return result
@@ -1268,9 +1501,13 @@ def optimize_script(text):
     for l in lines:
         if "|" in l:
             cells = [c.strip() for c in l.strip().strip("|").split("|")]
-            tab_rows.append(cells)
         elif "	" in l:
-            tab_rows.append([c.strip() for c in l.split("	")])
+            cells = [c.strip() for c in l.split("	")]
+        else:
+            continue
+        if all(re.fullmatch(r":?-+:?", c) for c in cells if c):  # Markdown 分隔行
+            continue
+        tab_rows.append(cells)
     if len(tab_rows) >= 2:
         header = [h.lower() for h in tab_rows[0]]
         idx = {"t": -1, "pic": -1, "voice": -1, "audio": -1}
@@ -1311,15 +1548,94 @@ def optimize_script(text):
             scenes.append({"seconds": sec, "length": seconds_to_length(sec), "prompt": prompt, "subtitle": subtitle})
         if scenes:
             return scenes
-    # 2) 纯文字：按空行拆，或整段
+    # 2) 纯文字/故事：按空行分段，段内按句子攒镜，每镜不超过 15 秒（约 60 字 5 秒）
     blocks = [b.strip() for b in text.replace(chr(13), "").split(chr(10) + chr(10)) if b.strip()]
     if not blocks:
         blocks = [text]
-    scenes = []
+    shots = []
     for b in blocks:
-        sec = max(5, min(15, 5 + (len(b) // 40) * 5))
-        scenes.append({"seconds": sec, "length": seconds_to_length(sec), "prompt": b, "subtitle": ""})
+        cur = ""
+        for s in re.split(r"(?<=[。！？!?…；;])", b.replace(chr(10), "")):
+            if not s.strip():
+                continue
+            if cur and len(cur) + len(s) > 60:
+                shots.append(cur)
+                cur = s
+            else:
+                cur += s
+        if cur:
+            shots.append(cur)
+    scenes = []
+    for s in shots:
+        sec = max(5, min(15, 5 + (len(s) // 60) * 5))
+        scenes.append({"seconds": sec, "length": seconds_to_length(sec), "prompt": s, "subtitle": ""})
     return scenes
+
+
+AI_SPLIT_SYS = (
+    "你是短视频分镜师。把用户给的脚本拆成 1-8 个 5-15 秒的镜头，覆盖全部剧情。"
+    "prompt 写中文画面描述：主体、动作、景别（远景/中景/近景/特写）、光线氛围；"
+    "台词与旁白写成「画外音：…」放进 prompt；屏幕上出现的文字（消息、短信、标题、字幕）一律放 subtitle，不要写进 prompt。"
+    "不要写风格后缀，不要写镜头编号。"
+    '只输出 JSON：{"scenes":[{"seconds":5,"prompt":"…","subtitle":""}]}'
+)
+
+
+def _ollama_chat_model():
+    """本机可用的对话模型：优先 OLLAMA_CHAT_MODEL，否则取 Ollama 里第一个非向量模型。"""
+    global _AI_MODEL
+    if _AI_MODEL:
+        return _AI_MODEL
+    try:
+        with urllib.request.urlopen(_OLLAMA_URL.rstrip("/") + "/api/tags", timeout=5) as r:
+            names = [m.get("name") or "" for m in json.load(r).get("models", [])]
+    except Exception:
+        return None
+    if _OLLAMA_CHAT_MODEL in names:
+        _AI_MODEL = _OLLAMA_CHAT_MODEL
+    else:
+        _AI_MODEL = next((n for n in names if "bge" not in n and "embed" not in n), "")
+    return _AI_MODEL or None
+
+
+def ai_split_scenes(text):
+    """本地 Ollama 把脚本拆成分镜；模型不可用或输出不可解析时返回 None，调用方回退规则解析。"""
+    model = _ollama_chat_model()
+    if not model:
+        return None
+    body = {
+        "model": model, "stream": False, "think": False, "format": "json", "keep_alive": "0",
+        "messages": [{"role": "system", "content": AI_SPLIT_SYS},
+                     {"role": "user", "content": text[:AI_SPLIT_MAX_CHARS]}],
+        "options": {"temperature": 0.3, "num_ctx": 8192},
+    }
+    try:
+        req = urllib.request.Request(
+            _OLLAMA_URL.rstrip("/") + "/api/chat", data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=AI_SPLIT_TIMEOUT) as r:
+            content = json.load(r)["message"]["content"]
+        data = json.loads(re.search(r"[\[{].*[\]}]", content, re.S).group(0))
+    except Exception:
+        return None
+    raw = data.get("scenes") if isinstance(data, dict) else data
+    if not isinstance(raw, list):
+        return None
+    scenes = []
+    for s in raw:
+        if not isinstance(s, dict):
+            continue
+        prompt = str(s.get("prompt") or "").strip()
+        if not prompt:
+            continue
+        try:
+            sec = int(float(s.get("seconds") or 5))
+        except (TypeError, ValueError):
+            sec = 5
+        sec = max(5, min(15, sec))
+        scenes.append({"seconds": sec, "length": seconds_to_length(sec),
+                       "prompt": prompt, "subtitle": str(s.get("subtitle") or "").strip()})
+    return scenes or None
 
 
 def new_scene_defaults():
@@ -1327,13 +1643,62 @@ def new_scene_defaults():
 
 
 # ---- 状态持久化 ----
-def load_state():
+def _current_project_id():
+    try:
+        return str((json.load(open(CURRENT_PROJECT_FILE, encoding="utf-8")) or {}).get("id") or "default")
+    except Exception:
+        return "default"
+
+
+def _state_path():
+    pid = _current_project_id()
+    if pid == "default":
+        return STATE_FILE
+    return os.path.join(PROJECTS_DIR, pid + ".json")
+
+
+def list_projects():
+    """列出全部项目：默认项目(state.json) + projects 目录，最近更新在前。"""
+    out = []
     try:
         st = json.load(open(STATE_FILE, encoding="utf-8"))
     except Exception:
         st = {}
+    def_scenes = st.get("scenes") or []
+    out.append({"id": "default", "name": st.get("name") or "默认项目",
+                "scenes": len(def_scenes),
+                "done": sum(1 for s in def_scenes if s.get("output")),
+                "updated": int(os.path.getmtime(STATE_FILE)) if os.path.isfile(STATE_FILE) else 0})
+    if os.path.isdir(PROJECTS_DIR):
+        for f in sorted(os.listdir(PROJECTS_DIR)):
+            if not f.endswith(".json"):
+                continue
+            pid = f[:-5]
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", pid):
+                continue
+            p = os.path.join(PROJECTS_DIR, f)
+            try:
+                st = json.load(open(p, encoding="utf-8"))
+            except Exception:
+                continue
+            pscenes = st.get("scenes") or []
+            out.append({"id": pid, "name": st.get("name") or pid,
+                        "scenes": len(pscenes),
+                        "done": sum(1 for s in pscenes if s.get("output")),
+                        "updated": int(os.path.getmtime(p))})
+    out.sort(key=lambda x: x["updated"], reverse=True)
+    return out
+
+
+def load_state():
+    try:
+        st = json.load(open(_state_path(), encoding="utf-8"))
+    except Exception:
+        st = {}
     st.setdefault("scenes", [])
     st.setdefault("character", {})
+    st.setdefault("scene", {})
+    st.setdefault("global_negative_prompt", "")
     scenes = st["scenes"]
     accepted = st.get("accepted") or {}
     for sc in scenes:
@@ -1357,7 +1722,10 @@ def load_state():
 
 
 def save_state(st):
-    json.dump(st, open(STATE_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    p = _state_path()
+    if p != STATE_FILE:
+        os.makedirs(PROJECTS_DIR, exist_ok=True)
+    json.dump(st, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
 
 # ---- 智能合成：镜头之间用 H3 首尾关键帧补过渡帧 ----
@@ -1385,13 +1753,27 @@ def extract_last_frame(src_abs, out_abs):
         raise RuntimeError("抽尾帧失败: " + r.stderr[-300:])
 
 
-def build_bridge_graph(first_frame, last_frame, prompt, seed, prefix):
+def chain_first_frame(st, scene):
+    """自动续接：抽上一镜成片的尾帧，作为本镜首帧。"""
+    scenes = st.get("scenes") or []
+    idx = next((i for i, s in enumerate(scenes) if s.get("id") == scene.get("id")), -1)
+    prev = scenes[idx - 1].get("output") if idx > 0 else None
+    src = os.path.join(OUTPUT_DIR, prev) if prev else ""
+    if not src or not os.path.isfile(src):
+        return None
+    frames_dir = os.path.join(INPUT_DIR, "frames")
+    os.makedirs(frames_dir, exist_ok=True)
+    name = "chain_" + re.sub(r"[^0-9a-zA-Z_-]", "", str(scene.get("id") or "scene")) + "_" + time.strftime("%H%M%S") + ".png"
+    extract_last_frame(src, os.path.join(frames_dir, name))
+    return "frames/" + name
+
+
+def build_bridge_graph(first_frame, last_frame, prompt, seed, prefix, need_audio=True):
     w, h = BRIDGE_CANVAS
-    return {
+    graph = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": MODELS["unet"], "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": MODELS["clip"], "type": "minimax", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": MODELS["vae_video"]}},
-        "4": {"class_type": "VAELoader", "inputs": {"vae_name": MODELS["vae_audio"]}},
         "5": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
             "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt,
             "width": w, "height": h, "length": BRIDGE_LENGTH,
@@ -1407,10 +1789,15 @@ def build_bridge_graph(first_frame, last_frame, prompt, seed, prefix):
             "noise": ["9", 0], "guider": ["6", 0], "sampler": ["8", 0],
             "sigmas": ["7", 0], "latent_image": ["5", 1]}},
         "11": {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["3", 0]}},
-        "12": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["10", 0], "vae": ["4", 0]}},
-        "13": {"class_type": "CreateVideo", "inputs": {"images": ["11", 0], "fps": 24.0, "audio": ["12", 0]}},
-        "14": {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": prefix, "format": "auto"}},
     }
+    video_inputs = {"images": ["11", 0], "fps": 24.0}
+    if need_audio:
+        graph["4"] = {"class_type": "VAELoader", "inputs": {"vae_name": MODELS["vae_audio"]}}
+        graph["12"] = {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["10", 0], "vae": ["4", 0]}}
+        video_inputs["audio"] = ["12", 0]
+    graph["13"] = {"class_type": "CreateVideo", "inputs": video_inputs}
+    graph["14"] = {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": prefix, "format": "auto"}}
+    return graph
 
 
 def _submit_and_wait(graph, timeout=1500):
@@ -1447,8 +1834,13 @@ def _submit_and_wait(graph, timeout=1500):
     return {"ok": False, "error": "timeout"}
 
 
-def smart_transcode(seq, subtitles):
-    """镜头 + 过渡片统一转码拼接（归一到 848x480@24fps、44.1kHz 音频）。"""
+def _has_audio(path):
+    r = _ffmpeg_run([_ffmpeg(), "-i", path])
+    return "Audio:" in (r.stderr or "")
+
+
+def smart_transcode(seq, subtitles, with_audio=True):
+    """镜头 + 过渡片统一转码拼接（归一到 848x480@24fps）。with_audio=False 时丢弃全部音轨。"""
     ff = _ffmpeg()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     final = os.path.join(OUTPUT_DIR, "script2video_final_" + time.strftime("%Y%m%d_%H%M%S") + ".mp4")
@@ -1457,9 +1849,13 @@ def smart_transcode(seq, subtitles):
         cmd += ["-i", s]
     n = len(seq)
     vparts = ["[%d:v]scale=848:480,fps=24,setsar=1[v%d]" % (i, i) for i in range(n)]
-    aparts = ["[%d:a]aresample=44100[a%d]" % (i, i) for i in range(n)]
-    fc = ";".join(vparts + aparts)
-    fc += ";" + "".join("[v%d][a%d]" % (i, i) for i in range(n)) + "concat=n=%d:v=1:a=1[vv][aa]" % n
+    if with_audio:
+        aparts = ["[%d:a]aresample=44100[a%d]" % (i, i) for i in range(n)]
+        fc = ";".join(vparts + aparts)
+        fc += ";" + "".join("[v%d][a%d]" % (i, i) for i in range(n)) + "concat=n=%d:v=1:a=1[vv][aa]" % n
+    else:
+        fc = ";".join(vparts)
+        fc += ";" + "".join("[v%d]" % i for i in range(n)) + "concat=n=%d:v=1:a=0[vv]" % n
     BS = chr(92)
     vf = []
     for s in subtitles or []:
@@ -1475,25 +1871,30 @@ def smart_transcode(seq, subtitles):
     if vf:
         fc += ";[vv]" + ",".join(vf) + "[vvsub]"
         out_v = "vvsub"
-    cmd += ["-filter_complex", fc, "-map", "[" + out_v + "]", "-map", "[aa]",
-            "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", final]
+    cmd += ["-filter_complex", fc, "-map", "[" + out_v + "]",
+            "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    if with_audio:
+        cmd += ["-map", "[aa]", "-c:a", "aac", "-b:a", "192k", "-ar", "44100"]
+    else:
+        cmd += ["-an"]
+    cmd.append(final)
     r = _ffmpeg_run(cmd)
     if r.returncode != 0:
         raise RuntimeError("合成失败: " + r.stderr[-800:])
     return os.path.basename(final)
 
 
-def start_smart_concat(clips, subtitles):
-    """启动后台补帧合成。优先使用故事板段落；否则用镜头输出（clips 为空时取 state）。"""
+def start_smart_concat(clips, subtitles, need_audio=True, subtitle=True, bridge=True):
+    """启动后台合成。bridge=False 直接串接镜头；否则两镜之间用 H3 首尾关键帧补过渡片。"""
     st = load_state()
-    segs = [s for s in (st.get("segments") or [])
-            if os.path.isfile(os.path.join(OUTPUT_DIR, s))]
-    if len(segs) >= 2:
-        abs_clips = [os.path.join(OUTPUT_DIR, s) for s in segs]
-        subtitles = _seg_subtitles(st)
-    else:
-        abs_clips = []
+    abs_clips = []
+    if bridge:
+        segs = [s for s in (st.get("segments") or [])
+                if os.path.isfile(os.path.join(OUTPUT_DIR, s))]
+        if len(segs) >= 2:
+            abs_clips = [os.path.join(OUTPUT_DIR, s) for s in segs]
+            subtitles = _seg_subtitles(st) if subtitle else []
+    if not abs_clips:
         if clips:
             for c in clips:
                 p = os.path.join(OUTPUT_DIR, c.lstrip("/")) if not os.path.isabs(c) else c
@@ -1508,55 +1909,57 @@ def start_smart_concat(clips, subtitles):
                 if os.path.isfile(p):
                     abs_clips.append(p)
     if len(abs_clips) < 2:
-        return {"ok": False, "error": "至少需要 2 个已生成的镜头才能补帧合成"}
+        return {"ok": False, "error": "至少需要 2 个已生成的镜头才能合成"}
     status = SMART_CONCAT_STATUS
     if status.get("running"):
         return {"ok": True, "started": False, "busy": True}
-    status.update(running=True, stage="bridging", done=0, total=len(abs_clips) - 1,
+    status.update(running=True, stage="bridging" if bridge else "concat", done=0,
+                  total=(len(abs_clips) - 1) if bridge else 0,
                   current="", result=None, error=None, log=[])
-    threading.Thread(target=smart_concat_job, args=(abs_clips, subtitles, st), daemon=True).start()
+    threading.Thread(target=smart_concat_job, args=(abs_clips, subtitles, st, need_audio, bridge), daemon=True).start()
     return {"ok": True, "started": True}
 
 
-def smart_concat_job(clips, subtitles, st):
+def smart_concat_job(clips, subtitles, st, need_audio=True, bridge=True):
     status = SMART_CONCAT_STATUS
     try:
         stamp = time.strftime("%H%M%S")
-        frames_dir = os.path.join(INPUT_DIR, "frames", "bridge_" + stamp)
-        os.makedirs(frames_dir, exist_ok=True)
         scenes = st["scenes"]
-        bridges = list(st.get("bridges") or [])
         need = len(clips) - 1
-        if not (len(bridges) == need and all(os.path.isfile(os.path.join(OUTPUT_DIR, b)) for b in bridges)):
-            bridges = []
-            for i in range(need):
-                status["current"] = "过渡 %d/%d" % (i + 1, need)
-                prev_frame = os.path.join(frames_dir, "b%d_prev.png" % i)
-                next_frame = os.path.join(frames_dir, "b%d_next.png" % i)
-                extract_last_frame(clips[i], prev_frame)
-                extract_first_frame(clips[i + 1], next_frame)
-                prev_prompt = (scenes[i].get("prompt") or "").strip() if i < len(scenes) else ""
-                next_prompt = (scenes[i + 1].get("prompt") or "").strip() if i + 1 < len(scenes) else ""
-                prompt = ("无缝转场补帧：镜头从「%s」平滑过渡到「%s」。"
-                          "运镜连续不中断，人物与主体的外貌、服装保持不变，"
-                          "动作衔接自然，光线与色调渐变过渡，无跳变、无切镜、无黑场。"
-                          "电影质感，真实实拍风格，无字幕无水印。" %
-                          (prev_prompt[:80], next_prompt[:80]))
-                rel_prev = os.path.relpath(prev_frame, INPUT_DIR).replace(os.sep, "/")
-                rel_next = os.path.relpath(next_frame, INPUT_DIR).replace(os.sep, "/")
-                r = _submit_and_wait(build_bridge_graph(
-                    rel_prev, rel_next, prompt, 7100 + i,
-                    "video/bridge_%d_%s" % (i, stamp)))
-                if not r.get("ok"):
-                    raise RuntimeError("过渡 %d 生成失败: %s" % (i, r.get("error")))
-                bridges.append(r["file"])
-                status["done"] = i + 1
-                status["log"].append("过渡 %d: %s" % (i, r["file"]))
-            st["bridges"] = bridges
-            save_state(st)
-        else:
-            status["done"] = need
-            status["log"].append("复用已有过渡片")
+        bridges = list(st.get("bridges") or []) if bridge else []
+        if bridge:
+            if not (len(bridges) == need and all(os.path.isfile(os.path.join(OUTPUT_DIR, b)) for b in bridges)):
+                frames_dir = os.path.join(INPUT_DIR, "frames", "bridge_" + stamp)
+                os.makedirs(frames_dir, exist_ok=True)
+                bridges = []
+                for i in range(need):
+                    status["current"] = "过渡 %d/%d" % (i + 1, need)
+                    prev_frame = os.path.join(frames_dir, "b%d_prev.png" % i)
+                    next_frame = os.path.join(frames_dir, "b%d_next.png" % i)
+                    extract_last_frame(clips[i], prev_frame)
+                    extract_first_frame(clips[i + 1], next_frame)
+                    prev_prompt = (scenes[i].get("prompt") or "").strip() if i < len(scenes) else ""
+                    next_prompt = (scenes[i + 1].get("prompt") or "").strip() if i + 1 < len(scenes) else ""
+                    prompt = ("无缝转场补帧：镜头从「%s」平滑过渡到「%s」。"
+                              "运镜连续不中断，人物与主体的外貌、服装保持不变，"
+                              "动作衔接自然，光线与色调渐变过渡，无跳变、无切镜、无黑场。"
+                              "电影质感，真实实拍风格，无字幕无水印。" %
+                              (prev_prompt[:80], next_prompt[:80]))
+                    rel_prev = os.path.relpath(prev_frame, INPUT_DIR).replace(os.sep, "/")
+                    rel_next = os.path.relpath(next_frame, INPUT_DIR).replace(os.sep, "/")
+                    r = _submit_and_wait(build_bridge_graph(
+                        rel_prev, rel_next, prompt, 7100 + i,
+                        "video/bridge_%d_%s" % (i, stamp), need_audio))
+                    if not r.get("ok"):
+                        raise RuntimeError("过渡 %d 生成失败: %s" % (i, r.get("error")))
+                    bridges.append(r["file"])
+                    status["done"] = i + 1
+                    status["log"].append("过渡 %d: %s" % (i, r["file"]))
+                st["bridges"] = bridges
+                save_state(st)
+            else:
+                status["done"] = need
+                status["log"].append("复用已有过渡片")
         status["stage"] = "concat"
         status["current"] = "合成中"
         seq = []
@@ -1564,7 +1967,10 @@ def smart_concat_job(clips, subtitles, st):
             seq.append(clips[i])
             if i < len(bridges):
                 seq.append(os.path.join(OUTPUT_DIR, bridges[i]))
-        final = smart_transcode(seq, subtitles)
+        with_audio = need_audio and all(_has_audio(p) for p in seq)
+        if need_audio and not with_audio:
+            status["log"].append("部分镜头无音轨，本次成片不含音频")
+        final = smart_transcode(seq, subtitles, with_audio)
         status["result"] = final
         status["stage"] = "done"
         status["log"].append("成片: " + final)
@@ -1716,7 +2122,12 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        if self.path == "/":
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "home.html")
+            if os.path.exists(p):
+                self._send_file(p, "text/html; charset=utf-8")
+                return
+        elif self.path == "/index.html":
             p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html")
             if os.path.exists(p):
                 self._send_file(p, "text/html; charset=utf-8")
@@ -1760,13 +2171,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         elif self.path == "/api/state":
             st = load_state()
-            self._send(200, {"ok": True, "scenes": st["scenes"], "character": st.get("character") or {}})
+            pid = _current_project_id()
+            pname = (st.get("name") or "默认项目") if pid == "default" else (st.get("name") or pid)
+            self._send(200, {"ok": True, "scenes": st["scenes"], "character": st.get("character") or {},
+                             "scene": st.get("scene") or {},
+                             "global_negative_prompt": st.get("global_negative_prompt") or "",
+                             "project": {"id": pid, "name": pname}})
+            return
+        elif self.path == "/api/projects":
+            projects = list_projects()
+            self._send(200, {"ok": True, "current": _current_project_id(), "projects": projects})
             return
         elif self.path == "/api/assets":
             self._send(200, {"ok": True, "assets": list_assets()})
             return
+        elif self.path == "/api/outputs":
+            self._send(200, {"ok": True, "outputs": list_outputs()})
+            return
         elif self.path == "/api/assets/tags":
             self._send(200, {"ok": True, "tags": _load_json(TAGS_FILE, {})})
+            return
+        elif self.path == "/api/assets/graph":
+            self._send(200, {"ok": True, "graph": _neo4j_read_asset_graph()})
             return
         elif self.path == "/api/knowledge":
             ensure_knowledge_graph()
@@ -1792,7 +2218,10 @@ class Handler(BaseHTTPRequestHandler):
                 text = body.get("text") or ""
                 if body.get("docx_b64"):
                     text = extract_document(body["docx_b64"], body.get("filename") or "")
-                scenes = optimize_script(text)
+                scenes = ai_split_scenes(text) if text.strip() and body.get("ai", True) else None
+                engine = "ai" if scenes else "rule"
+                if not scenes:
+                    scenes = optimize_script(text)
                 st = load_state()
                 existing = st["scenes"]
                 base = 0
@@ -1809,11 +2238,11 @@ class Handler(BaseHTTPRequestHandler):
                     s["output"] = None
                 st["scenes"] = (existing + scenes) if body.get("append") else scenes
                 save_state(st)
-                self._send(200, {"ok": True, "scenes": scenes, "append": bool(body.get("append"))})
+                self._send(200, {"ok": True, "scenes": scenes, "append": bool(body.get("append")), "engine": engine})
             elif self.path == "/api/generate":
                 raw = self._body().get("scene", {})
                 matched = None
-                if raw.get("auto_match") and not raw.get("first_frame"):
+                if raw.get("auto_match"):
                     m = auto_match_image(raw.get("prompt") or "")
                     if m:
                         try:
@@ -1823,14 +2252,26 @@ class Handler(BaseHTTPRequestHandler):
                             os.makedirs(frames_dir, exist_ok=True)
                             dst_name = "auto_" + time.strftime("%H%M%S") + "_" + str(random.randrange(100, 999)) + ext
                             shutil.copyfile(src, os.path.join(frames_dir, dst_name))
-                            raw["first_frame"] = "frames/" + dst_name
+                            raw["auto_guides"] = ["frames/" + dst_name]
                             _record_asset_usage(m["path"], str(raw.get("id") or "scene"), str(raw.get("prompt") or ""))
                             matched = {"name": m["name"], "path": m["path"], "score": m["score"]}
                         except Exception as e:
                             matched = {"error": str(e)}
                 ch = (load_state().get("character") or {})
-                if ch.get("description") and not raw.get("character"):
+                if ch.get("description") and not (raw.get("character") or {}).get("description"):
                     raw["character"] = ch
+                sc = (load_state().get("scene") or {})
+                if sc.get("description") and not (raw.get("scene") or {}).get("description"):
+                    raw["scene"] = sc
+                stg = load_state()
+                if (stg.get("global_negative_prompt") or "").strip() and not raw.get("global_negative_prompt"):
+                    raw["global_negative_prompt"] = stg["global_negative_prompt"]
+                chain_wanted = bool(raw.get("chain_frames")) and not raw.get("first_frame")
+                chained = None
+                if chain_wanted:
+                    chained = chain_first_frame(stg, raw)
+                    if chained:
+                        raw["first_frame"] = chained
                 scene = prepare_scene(raw)
                 scene.setdefault("prefix", "video/" + scene.get("id", "scene") + "_" + time.strftime("%H%M%S"))
                 r = generate_scene(scene)
@@ -1855,6 +2296,12 @@ class Handler(BaseHTTPRequestHandler):
                 if matched is not None:
                     r = dict(r)
                     r["matched"] = matched
+                if chained:
+                    r = dict(r)
+                    r["chained"] = chained
+                elif chain_wanted:
+                    r = dict(r)
+                    r["chain_skip"] = "上一镜还没有成片"
                 self._send(200, r)
             elif self.path == "/api/upload_frame":
                 body = self._body()
@@ -1972,16 +2419,54 @@ class Handler(BaseHTTPRequestHandler):
                     ch["image"] = body.get("image") or None
                 save_state(st)
                 self._send(200, {"ok": True, "character": ch})
+            elif self.path == "/api/global":
+                body = self._body()
+                st = load_state()
+                st["global_negative_prompt"] = str(body.get("negative_prompt") or "").strip()
+                save_state(st)
+                self._send(200, {"ok": True, "global_negative_prompt": st["global_negative_prompt"]})
+            elif self.path == "/api/scene":
+                body = self._body()
+                st = load_state()
+                sc = st["scene"]
+                sc["name"] = str(body.get("name") or "").strip()
+                sc["description"] = str(body.get("description") or "").strip()
+                save_state(st)
+                self._send(200, {"ok": True, "scene": sc})
+            elif self.path == "/api/project/new":
+                body = self._body()
+                name = str(body.get("name") or "").strip()[:40] or ("新项目 " + time.strftime("%m-%d %H:%M"))
+                pid = "p" + time.strftime("%Y%m%d%H%M%S") + "_" + str(random.randrange(100, 999))
+                os.makedirs(PROJECTS_DIR, exist_ok=True)
+                p = os.path.join(PROJECTS_DIR, pid + ".json")
+                if not os.path.abspath(p).startswith(os.path.abspath(PROJECTS_DIR) + os.sep):
+                    self._send(200, {"ok": False, "error": "非法项目 ID"})
+                    return
+                json.dump({"name": name, "scenes": [], "character": {}}, open(p, "w", encoding="utf-8"),
+                          ensure_ascii=False, indent=2)
+                json.dump({"id": pid}, open(CURRENT_PROJECT_FILE, "w", encoding="utf-8"))
+                self._send(200, {"ok": True, "project": {"id": pid, "name": name}})
+            elif self.path == "/api/project/select":
+                body = self._body()
+                pid = str(body.get("id") or "default")
+                if pid != "default" and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", pid):
+                    self._send(200, {"ok": False, "error": "非法项目 ID"})
+                    return
+                p = STATE_FILE if pid == "default" else os.path.join(PROJECTS_DIR, pid + ".json")
+                if pid != "default" and not (os.path.abspath(p).startswith(os.path.abspath(PROJECTS_DIR) + os.sep) and os.path.isfile(p)):
+                    self._send(200, {"ok": False, "error": "项目不存在"})
+                    return
+                json.dump({"id": pid}, open(CURRENT_PROJECT_FILE, "w", encoding="utf-8"))
+                self._send(200, {"ok": True, "project": {"id": pid}})
             elif self.path == "/api/concat":
                 body = self._body()
                 clips = body.get("clips", [])
                 subs = body.get("subtitles", [])
-                if body.get("bridge", True):
-                    # 默认走智能合成：镜头之间用 H3 首尾关键帧补过渡帧
-                    r = start_smart_concat(clips, subs)
-                else:
-                    abs_clips = [os.path.join(OUTPUT_DIR, c.lstrip("/")) if not os.path.isabs(c) else c for c in clips]
-                    r = concat_scenes(abs_clips, subs)
+                if not body.get("subtitle", True):
+                    subs = []
+                need_audio = bool(body.get("need_audio", True))
+                # bridge=True 走智能合成（两镜之间用 H3 首尾关键帧补过渡帧），False 直接串接
+                r = start_smart_concat(clips, subs, need_audio, bridge=bool(body.get("bridge", True)))
                 self._send(200, r)
             elif self.path == "/api/generate_segments":
                 if SEGMENT_STATUS.get("running"):
@@ -2007,8 +2492,7 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(raw)
                 st = os.stat(os.path.join(ASSETS_DIR, fname))
                 aid = _mysql_set_asset(fname, fname, st.st_size, int(st.st_mtime), "", "upload")
-                if aid is not None:
-                    _neo4j_index_assets([{"id": aid, "path": fname, "name": fname, "tags": ""}], prune=False)
+                _neo4j_index_assets([{"path": fname, "name": fname, "tags": ""}], prune=False)
                 self._send(200, {"ok": True, "file": fname, "id": aid})
             elif self.path == "/api/assets/delete":
                 rel = (self._body().get("path") or "").replace("\\", "/").lstrip("/")
@@ -2018,6 +2502,17 @@ class Handler(BaseHTTPRequestHandler):
                         os.remove(p)
                         _mysql_delete_asset(rel)
                         _neo4j_unindex_asset(rel)
+                        self._send(200, {"ok": True})
+                    else:
+                        self._send(200, {"ok": False, "error": "文件不存在"})
+                except ValueError as ve:
+                    self._send(200, {"ok": False, "error": str(ve)})
+            elif self.path == "/api/outputs/delete":
+                rel = (self._body().get("path") or "").replace("\\", "/").lstrip("/")
+                try:
+                    p = resolve_output_path(rel)
+                    if os.path.isfile(p):
+                        os.remove(p)
                         self._send(200, {"ok": True})
                     else:
                         self._send(200, {"ok": False, "error": "文件不存在"})
@@ -2044,9 +2539,8 @@ class Handler(BaseHTTPRequestHandler):
                     json.dump(data, open(TAGS_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
                 except Exception:
                     pass
-                aid = _mysql_set_asset(pth, os.path.basename(pth), tags=t, source="manual")
-                if aid is not None:
-                    _neo4j_index_assets([{"id": aid, "path": pth, "name": os.path.basename(pth), "tags": t}], prune=False)
+                _mysql_set_asset(pth, os.path.basename(pth), tags=t, source="manual")
+                _neo4j_index_assets([{"path": pth, "name": os.path.basename(pth), "tags": t}], prune=False)
                 self._send(200, {"ok": True, "tags": t})
             elif self.path == "/api/knowledge":
                 g = self._body().get("graph") or {}

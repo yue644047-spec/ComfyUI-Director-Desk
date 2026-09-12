@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>项目选择</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<script src="/static/vendor/tailwind.js"></script>
+<script src="/static/vendor/iconify-icon.min.js"></script>
+<script src="/static/vendor/lucide-icons.js"></script>
+<style>
+.card { transition: border-color .15s ease, background-color .15s ease, transform .15s ease; }
+.card:hover { border-color: rgba(34,211,238,.5); transform: translateY(-2px); }
+.card:hover .arrow { opacity: 1; transform: translateX(2px); }
+.arrow { opacity: .4; transition: opacity .15s ease, transform .15s ease; }
+.bar { transition: height .3s ease; }
+</style>
+</head>
+<body class="min-h-screen bg-[#090b12] text-slate-100 antialiased">
+<div class="min-h-screen bg-[radial-gradient(circle_at_75%_0%,#202c48_0%,transparent_28%),linear-gradient(135deg,#0b0e17,#090b12_55%,#101321)]">
+
+  <header class="border-b border-white/10 bg-[#0b0e17]/80 px-8 py-4 backdrop-blur-sm">
+    <div class="mx-auto flex max-w-[1540px] items-center justify-between">
+      <a class="flex items-center gap-3" href="/">
+        <span class="grid h-10 w-10 place-items-center rounded-xl bg-cyan-400 text-[#08101c] shadow-[0_0_30px_rgba(34,211,238,.25)]"><iconify-icon icon="lucide:clapperboard" width="23"></iconify-icon></span>
+      </a>
+      <nav class="flex items-center gap-2 text-sm text-slate-400">
+        <a class="rounded-lg bg-white/[.08] px-4 py-2 text-white" href="/">项目</a>
+        <a class="rounded-lg px-4 py-2 hover:bg-white/5" href="/index.html">导演工作台</a>
+        <span class="ml-3 flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs">
+          <span id="comfyDot" class="h-2 w-2 rounded-full bg-slate-500"></span><span id="comfyStatus">检测 ComfyUI…</span>
+        </span>
+        <button id="btnNew" class="ml-1 flex items-center gap-2 rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-[#08101c] transition hover:bg-cyan-300"><iconify-icon icon="lucide:plus" width="18"></iconify-icon>新建导演项目</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-[1540px] px-8 pb-14 pt-12">
+    <div class="mb-10 flex items-end justify-between">
+      <div>
+        <p class="mb-3 flex items-center gap-2 text-sm text-cyan-300"><span class="h-px w-8 bg-cyan-300"></span><span id="todayLine">创作空间</span></p>
+        <h1 class="text-4xl font-semibold tracking-tight">把想法直接切成影片。</h1>
+        <p class="mt-3 max-w-xl text-base leading-7 text-slate-400">从一句简报到分镜、音轨与成片，让 AI 成为你的策划、摄影与后期团队。</p>
+      </div>
+      <button id="btnNewTop" class="flex items-center gap-2 rounded-xl bg-cyan-400 px-5 py-3 font-semibold text-[#08101c] transition hover:bg-cyan-300"><iconify-icon icon="lucide:plus" width="20"></iconify-icon>新建导演项目</button>
+    </div>
+
+    <section class="mb-12 grid grid-cols-[1.42fr_.58fr] gap-6">
+      <button id="featured" class="group relative min-h-[320px] overflow-hidden rounded-2xl border border-white/10 bg-[#151b2c] p-8 text-left shadow-2xl shadow-black/20"></button>
+      <div class="rounded-2xl border border-white/10 bg-[#101522] p-7">
+        <div class="flex items-center justify-between"><h2 class="font-semibold">创作进度总览</h2><iconify-icon class="text-cyan-300" icon="lucide:layout-grid" width="22"></iconify-icon></div>
+        <div id="bars" class="mt-7 flex h-28 items-end gap-3 border-b border-white/10 pb-2"></div>
+        <div id="barLabels" class="mt-3 flex gap-3 text-center text-[11px] text-slate-500"></div>
+        <div id="tiles" class="mt-7 grid grid-cols-2 gap-3"></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="mb-5 flex items-center justify-between">
+        <div><h2 class="text-xl font-semibold">你的项目</h2><p class="mt-1 text-sm text-slate-500">继续上一次思路，或从灵感开始。</p></div>
+        <span id="projCount" class="text-sm text-slate-500"></span>
+      </div>
+      <div id="projects" class="grid gap-5 sm:grid-cols-2 xl:grid-cols-3"></div>
+    </section>
+
+    <p class="mt-10 text-[11px] text-slate-600">本地运行 · 项目数据存于 web\projects · 默认项目沿用 web\state.json</p>
+  </main>
+
+</div>
+
+<div id="newProject" style="display:none" class="fixed inset-0 z-20 place-items-center bg-black/70 p-6 backdrop-blur-sm">
+  <div class="w-full max-w-lg rounded-2xl border border-white/10 bg-[#141a2a] p-7 shadow-2xl">
+    <div class="flex items-center justify-between">
+      <h2 class="text-xl font-semibold">新建导演项目</h2>
+      <button id="btnCloseNew" class="text-slate-400 hover:text-slate-200"><iconify-icon icon="lucide:x-circle" width="22"></iconify-icon></button>
+    </div>
+    <label class="mt-6 block text-sm text-slate-300">项目名称
+      <input id="newName" class="mt-2 w-full rounded-xl border border-white/10 bg-[#0c101b] px-4 py-3 text-slate-100 outline-none focus:border-cyan-400" placeholder="未命名的秋日故事"/>
+    </label>
+    <button id="btnCreate" class="mt-6 flex w-full justify-center rounded-xl bg-cyan-400 py-3 font-semibold text-[#08101c] transition hover:bg-cyan-300">创建并进入导演台</button>
+  </div>
+</div>
+
+<div id="toast" class="pointer-events-none fixed bottom-6 left-1/2 z-50 hidden -translate-x-1/2 rounded-xl border border-cyan-400/30 bg-[#101822] px-4 py-3 text-sm text-cyan-100 shadow-2xl"></div>
+
+<script>
+function $(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function toast(msg) {
+  var t = $("toast");
+  t.textContent = msg;
+  t.classList.remove("hidden");
+  clearTimeout(t._tm);
+  t._tm = setTimeout(function () { t.classList.add("hidden"); }, 2600);
+}
+async function api(path, body) {
+  var r = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return await r.json();
+}
+function fmtTime(t) {
+  if (!t) return "—";
+  var d = new Date(t * 1000);
+  function p(x) { return (x < 10 ? "0" : "") + x; }
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+function pct(p) {
+  var s = p.scenes || 0, d = p.done || 0;
+  return s ? Math.round(d * 100 / s) : 0;
+}
+
+var currentId = "default";
+var COVERS = [
+  "from-[#132e35] via-[#395143] to-[#d89355]",
+  "from-[#1c1931] via-[#544d89] to-[#f0ad85]",
+  "from-[#0f2a33] via-[#1f4e57] to-[#59a3b8]",
+  "from-[#2a1b2e] via-[#5a3a63] to-[#c98aa6]",
+  "from-[#232b16] via-[#4c5a2c] to-[#b8c46b]",
+  "from-[#301b1b] via-[#6b3a35] to-[#d99b74]",
+];
+var BARS = ["bg-slate-700", "bg-slate-600", "bg-cyan-800", "bg-cyan-600", "bg-cyan-400", "bg-violet-500", "bg-slate-600"];
+
+function renderFeatured(p) {
+  var f = $("featured");
+  if (!p) {
+    f.disabled = true;
+    f.innerHTML = '<div class="relative flex h-full flex-col justify-between">'
+      + '<span class="w-fit rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs text-slate-400">还没有项目</span>'
+      + '<div><h2 class="mt-2 text-3xl font-semibold">从第一个故事开始</h2>'
+      + '<p class="mt-3 max-w-lg text-sm leading-6 text-slate-400">点击「新建导演项目」，写下片名即可进入分镜台。</p></div></div>';
+    return;
+  }
+  f.disabled = false;
+  var d = pct(p);
+  f.innerHTML =
+    '<div class="absolute right-0 top-0 h-full w-1/2 bg-[radial-gradient(circle_at_80%_20%,rgba(34,211,238,.25),transparent_38%),linear-gradient(130deg,transparent,rgba(111,59,255,.18))]"></div>'
+    + '<div class="relative flex h-full flex-col justify-between">'
+    + '<div class="flex justify-between">'
+    + '<span class="rounded-full border px-3 py-1 text-xs font-medium ' + (d >= 100 ? 'border-emerald-300/30 bg-emerald-300/10 text-emerald-200' : 'border-amber-300/30 bg-amber-300/10 text-amber-200') + '">' + (d >= 100 ? '已生成' : '正在制作') + '</span>'
+    + '<span class="text-xs text-slate-500">最后编辑于 ' + esc(fmtTime(p.updated)) + '</span>'
+    + '</div>'
+    + '<div>'
+    + '<p class="text-sm text-cyan-300">项目 · ' + (p.scenes || 0) + ' 个镜头</p>'
+    + '<h2 class="mt-2 text-3xl font-semibold">' + esc(p.name) + '</h2>'
+    + '<p class="mt-3 max-w-lg text-sm leading-6 text-slate-400">' + d + '% 已生成，继续上一次的思路，把剩下的镜头拍完。</p>'
+    + '<div class="mt-6 flex items-center gap-3 text-sm text-slate-300">'
+    + '<span class="flex items-center gap-1"><iconify-icon icon="lucide:film" width="15"></iconify-icon> ' + (p.scenes || 0) + ' 个镜头</span>'
+    + '<span class="h-1 w-1 rounded-full bg-slate-600"></span><span>' + d + '% 已生成</span>'
+    + '</div></div>'
+    + '<div class="mt-7 flex items-center gap-2 font-medium text-cyan-300">进入工作台 <iconify-icon class="transition group-hover:translate-x-1" icon="lucide:chevron-right" width="18"></iconify-icon></div>'
+    + '</div>';
+}
+
+function renderPanel(list) {
+  var totalS = 0, totalD = 0;
+  list.forEach(function (p) { totalS += p.scenes || 0; totalD += (p.done || 0); });
+  var bars = $("bars"), labels = $("barLabels");
+  if (!list.length) {
+    bars.innerHTML = '<p class="w-full pb-2 text-center text-xs text-slate-600">暂无项目</p>';
+    labels.innerHTML = "";
+  } else {
+    var shown = list.slice(0, 7);
+    bars.innerHTML = shown.map(function (p, i) {
+      var d = pct(p);
+      return '<i class="bar w-full rounded-t ' + BARS[i % BARS.length] + '" style="height:' + Math.max(6, d) + '%"></i>';
+    }).join("");
+    labels.innerHTML = shown.map(function (p) {
+      return '<span class="min-w-0 flex-1 truncate" title="' + esc(p.name) + '">' + esc(p.name) + '</span>';
+    }).join("");
+  }
+  $("tiles").innerHTML =
+    '<div class="rounded-xl bg-white/5 p-3"><b class="text-xl">' + totalS + '</b><span class="block text-xs text-slate-500">镜头总数</span></div>'
+    + '<div class="rounded-xl bg-white/5 p-3"><b class="text-xl text-cyan-300">' + totalD + '</b><span class="block text-xs text-slate-500">已生成</span></div>';
+}
+
+async function loadProjects() {
+  var box = $("projects");
+  try {
+    var r = await api("/api/projects");
+    if (!r.ok) { box.innerHTML = '<p class="col-span-full py-10 text-center text-xs text-slate-600">读取项目失败：' + esc(r.error || "") + '</p>'; return; }
+    var list = r.projects || [];
+    currentId = r.current;
+    $("projCount").textContent = list.length + " 个项目";
+    var cur = list.filter(function (p) { return p.id === r.current; })[0] || list[0] || null;
+    renderFeatured(cur);
+    renderPanel(list);
+    var h = "";
+    list.forEach(function (p, i) {
+      var isCur = p.id === r.current, d = pct(p);
+      h += '<button data-id="' + esc(p.id) + '" class="card group overflow-hidden rounded-2xl border bg-[#101522] text-left ' + (isCur ? 'border-cyan-400/50' : 'border-white/10') + '">'
+        + '<div class="relative h-32 overflow-hidden bg-gradient-to-br ' + COVERS[i % COVERS.length] + '">'
+        + '<iconify-icon class="absolute bottom-2 left-4 text-white/25" icon="lucide:clapperboard" width="64"></iconify-icon>'
+        + '<span class="absolute right-4 top-4 rounded-md bg-black/35 px-2 py-1 text-xs">' + (p.scenes || 0) + ' 镜</span>'
+        + (isCur ? '<span class="absolute left-4 top-4 rounded-full bg-cyan-400/90 px-2.5 py-1 text-[11px] font-bold text-[#08101c]">当前</span>' : '')
+        + '</div>'
+        + '<div class="p-5">'
+        + '<div class="flex justify-between text-xs text-slate-500"><span>项目</span><span class="flex items-center gap-1"><iconify-icon icon="lucide:clock-3" width="12"></iconify-icon>' + esc(fmtTime(p.updated)) + '</span></div>'
+        + '<h3 class="mt-2 truncate font-semibold">' + esc(p.name) + '</h3>'
+        + '<div class="mt-4 h-1.5 overflow-hidden rounded-full bg-white/[.08]"><div class="h-full rounded-full bg-cyan-400" style="width:' + d + '%"></div></div>'
+        + '<p class="mt-2 flex items-center justify-between text-xs text-slate-500"><span>' + d + '% · ' + (p.scenes || 0) + ' 个镜头</span><span class="arrow flex items-center gap-1 text-cyan-300">打开<iconify-icon icon="lucide:chevron-right" width="14"></iconify-icon></span></p>'
+        + '</div></button>';
+    });
+    h += '<button id="btnNewCard" class="flex min-h-[250px] flex-col items-center justify-center rounded-2xl border border-dashed border-slate-700 bg-white/[.02] text-slate-500 transition hover:border-cyan-400/50 hover:bg-cyan-400/5 hover:text-cyan-300">'
+      + '<span class="mb-4 grid h-12 w-12 place-items-center rounded-full bg-white/5"><iconify-icon icon="lucide:plus" width="26"></iconify-icon></span>'
+      + '<b class="text-sm">启动一个新故事</b><span class="mt-2 text-xs">写入片名即可开始分镜</span></button>';
+    box.innerHTML = h;
+  } catch (e) {
+    box.innerHTML = '<p class="col-span-full py-10 text-center text-xs text-slate-600">读取项目失败：' + esc(e.message) + '</p>';
+  }
+}
+
+async function openProject(id) {
+  var r = await api("/api/project/select", { id: id });
+  if (!r.ok) { toast("打开失败：" + (r.error || "")); return; }
+  location.href = "/index.html";
+}
+
+function showNew() { $("newProject").style.display = "grid"; $("newName").focus(); }
+function hideNew() { $("newProject").style.display = "none"; }
+async function createProject() {
+  var name = $("newName").value.trim() || "新项目";
+  var r = await api("/api/project/new", { name: name });
+  if (r.ok) location.href = "/index.html";
+  else toast("创建失败：" + (r.error || ""));
+}
+
+$("btnNew").addEventListener("click", showNew);
+$("btnNewTop").addEventListener("click", showNew);
+$("btnCloseNew").addEventListener("click", hideNew);
+$("btnCreate").addEventListener("click", createProject);
+$("newName").addEventListener("keydown", function (e) { if (e.key === "Enter") createProject(); });
+$("newProject").addEventListener("click", function (e) { if (e.target === this) hideNew(); });
+$("featured").addEventListener("click", function () { if (currentId) openProject(currentId); });
+$("projects").addEventListener("click", function (e) {
+  var card = e.target.closest("[data-id]");
+  if (card) openProject(card.getAttribute("data-id"));
+  else if (e.target.closest("#btnNewCard")) showNew();
+});
+
+async function checkComfy() {
+  var dot = $("comfyDot");
+  var st = $("comfyStatus");
+  try {
+    var r = await api("/api/status");
+    if (r.ok) {
+      dot.className = "h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_#34d399]";
+      st.textContent = "ComfyUI 在线 · 运行 " + r.running + " / 排队 " + r.pending;
+    } else {
+      dot.className = "h-2 w-2 rounded-full bg-red-400";
+      st.textContent = "ComfyUI 未连接";
+    }
+  } catch (e) {
+    dot.className = "h-2 w-2 rounded-full bg-red-400";
+    st.textContent = "ComfyUI 未连接";
+  }
+}
+
+var now = new Date();
+$("todayLine").textContent = now.getFullYear() + " 年 " + (now.getMonth() + 1) + " 月 " + now.getDate() + " 日 · 创作空间";
+checkComfy();
+setInterval(checkComfy, 15000);
+loadProjects();
+</script>
+</body>
+</html>

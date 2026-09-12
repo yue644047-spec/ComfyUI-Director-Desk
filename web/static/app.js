@@ -5,12 +5,22 @@ var docxB64 = null;
 var docxFilename = "";
 var docxName = "";
 var genAllStop = false;
+var needAudio = true;
+var subtitleOn = true;
+var chainFrames = false;
+var bridgeOn = true;
+var PAGE_SIZE = 1;
+var curPage = 0;
 var tagsMap = {};
 var currentAssets = [];
+var currentOutputs = [];
 var character = { name: "", description: "", image: null };
+var scene = { name: "", description: "" };
+var globalNeg = "";
 var videoModel = "MiniMax H3";
 var WAN_MODE_STEPS = { "标准": 30, "均衡": 20, "高清": 40, "极速": 10 };
 var WAN14_MODE_STEPS = { "标准": 20, "均衡": 20, "高清": 30, "极速": 10 };
+var S2V_MODE_STEPS = { "标准": 10, "均衡": 10, "高清": 15, "极速": 6 };
 
 var DEFAULT_SETTINGS = {
   theme: "violet",
@@ -29,14 +39,28 @@ var settings = {};
 function modelStepsFor() {
   if (videoModel === "Wan2.2 5B") return WAN_MODE_STEPS;
   if (videoModel === "Wan2.2 14B") return WAN14_MODE_STEPS;
+  if (videoModel === "Wan2.2 S2V") return S2V_MODE_STEPS;
   return MODE_STEPS;
 }
 
 function loadVideoModel() {
   try { videoModel = localStorage.getItem("director_video_model") || "MiniMax H3"; } catch (e) {}
-  if (videoModel !== "MiniMax H3" && videoModel !== "Wan2.2 5B" && videoModel !== "Wan2.2 14B") videoModel = "MiniMax H3";
+  if (videoModel !== "MiniMax H3" && videoModel !== "Wan2.2 5B" && videoModel !== "Wan2.2 14B" && videoModel !== "Wan2.2 S2V") videoModel = "MiniMax H3";
   var el = $("videoModelSel");
   if (el) el.value = videoModel;
+}
+
+function loadToggles() {
+  try {
+    needAudio = localStorage.getItem("director_need_audio") !== "0";
+    subtitleOn = localStorage.getItem("director_subtitle") !== "0";
+    chainFrames = localStorage.getItem("director_chain_frames") === "1";
+    bridgeOn = localStorage.getItem("director_bridge") !== "0";
+  } catch (e) {}
+  if ($("gblNeedAudio")) $("gblNeedAudio").checked = needAudio;
+  if ($("gblSubtitle")) $("gblSubtitle").checked = subtitleOn;
+  if ($("gblChain")) $("gblChain").checked = chainFrames;
+  if ($("gblBridge")) $("gblBridge").checked = bridgeOn;
 }
 
 function loadSettings() {
@@ -141,6 +165,15 @@ function esc(s) {
   return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 function pad2(n) { return (n < 10 ? "0" : "") + n; }
+function fmtTC(sec) {
+  var m = Math.floor(sec / 60), s = Math.round(sec % 60);
+  return pad2(m) + ":" + pad2(s);
+}
+function shotStartSec(i) {
+  var acc = 0;
+  for (var k = 0; k < i; k++) { acc += (scenes[k].seconds || 5) + BRIDGE_SEC; }
+  return acc;
+}
 function opts(arr, cur) {
   var h = "";
   for (var i = 0; i < arr.length; i++) {
@@ -165,7 +198,7 @@ function shortTitle(p) {
 function whOf(s) {
   var r = ASPECT_RATIOS[s.aspect] || [16, 9];
   var short = RES_WH[s.resolution] || RES_WH["480p"];
-  var snap = videoModel === "Wan2.2 5B" ? 32 : (videoModel === "Wan2.2 14B" ? 16 : 8);
+  var snap = videoModel === "Wan2.2 5B" ? 32 : (videoModel === "Wan2.2 14B" || videoModel === "Wan2.2 S2V" ? 16 : 8);
   var w, h;
   if (r[0] >= r[1]) { h = short; w = Math.round(short * r[0] / r[1]); }
   else { w = short; h = Math.round(short * r[1] / r[0]); }
@@ -232,14 +265,55 @@ function renderScenes() {
   var box = $("scenes");
   box.innerHTML = "";
   $("scenesEmpty").classList.toggle("hidden", scenes.length > 0);
-  scenes.forEach(function (s, i) {
+  var pages = Math.max(1, Math.ceil(scenes.length / PAGE_SIZE));
+  if (curPage < 0 || curPage >= pages) curPage = pages - 1;
+  var start = curPage * PAGE_SIZE;
+  scenes.slice(start, start + PAGE_SIZE).forEach(function (s, i) {
     var div = document.createElement("div");
-    div.innerHTML = shotCardHTML(s, i);
+    div.innerHTML = shotCardHTML(s, start + i);
     var card = div.firstElementChild;
-    if (i === curIdx) card.classList.add("ring-1", "ring-violet-500/60");
+    if (start + i === curIdx) card.classList.add("ring-1", "ring-violet-500/60");
     box.appendChild(card);
   });
   $("shotCount").textContent = scenes.length ? scenes.length + " 个镜头" : "";
+  renderPager(pages);
+  renderTimeline();
+}
+
+function renderTimeline() {
+  var box = $("timeline");
+  if (!box) return;
+  if (!scenes.length) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  var total = 0;
+  scenes.forEach(function (s) { total += (s.seconds || 5); });
+  $("timelineTotal").textContent = total + " 秒 · " + scenes.length + " 镜";
+  function track(clsOf, titleOf) {
+    return scenes.map(function (s, i) {
+      var w = Math.max(0.6, ((s.seconds || 5) / total) * 100);
+      return '<button data-idx="' + i + '" class="' + clsOf(s) + ' rounded-sm transition hover:brightness-125" style="width:' + w.toFixed(2) + '%" title="' + esc(titleOf(s, i)) + '"></button>';
+    }).join("");
+  }
+  $("trackVideo").innerHTML = track(
+    function (s) {
+      return s.status === "ok" ? "bg-emerald-400/80" : s.status === "busy" ? "bg-amber-400/80 animate-pulse" : s.status === "err" ? "bg-red-400/80" : "bg-slate-500/60";
+    },
+    function (s, i) { return "镜头 " + (i + 1) + " · " + fmtTC(shotStartSec(i)) + " · " + (s.seconds || 5) + "s · " + shortTitle(s.prompt); }
+  );
+  $("trackSub").innerHTML = track(
+    function (s) { return (s.subtitle && String(s.subtitle).trim()) ? "bg-amber-400/60" : "bg-white/[0.08]"; },
+    function (s) { var t = String(s.subtitle || "").trim(); return t ? "字幕 · " + t : "无字幕"; }
+  );
+}
+
+function renderPager(pages) {
+  var pager = $("scenePager");
+  if (!pager) return;
+  if (pages > 1) { pager.classList.remove("hidden"); pager.classList.add("flex"); }
+  else { pager.classList.add("hidden"); pager.classList.remove("flex"); }
+  $("pageInfo").textContent = "第 " + (curPage + 1) + " / " + pages + " 面 · 每面最多 " + PAGE_SIZE + " 镜";
+  $("btnPagePrev").disabled = curPage <= 0;
+  $("btnPageNext").disabled = curPage >= pages - 1;
 }
 
 function shotCardHTML(s, i) {
@@ -263,7 +337,7 @@ function shotCardHTML(s, i) {
   }
   return '<article class="shot rounded-xl border ' + st.border + ' bg-[#1b1b25] p-3.5 cursor-pointer transition hover:border-white/20" data-id="' + s.id + '" data-index="' + i + '">'
     + '<div class="flex items-center justify-between">'
-    + '<div class="flex min-w-0 items-center gap-2.5"><span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ' + st.num + ' text-xs font-bold">' + pad2(i + 1) + '</span><h4 class="truncate text-sm font-semibold">' + esc(title) + '</h4></div>'
+    + '<div class="flex min-w-0 items-center gap-2.5"><span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ' + st.num + ' text-xs font-bold">' + pad2(i + 1) + '</span><h4 class="truncate text-sm font-semibold">' + esc(title) + '</h4><span class="shrink-0 rounded bg-black/40 px-1.5 py-0.5 font-mono text-[10px] text-slate-500" title="成片中的起始时间">' + fmtTC(shotStartSec(i)) + '</span></div>'
     + '<div class="flex shrink-0 items-center gap-1.5">'
     + '<span id="st_' + s.id + '" class="flex items-center gap-1.5 rounded-full ' + st.badge + ' px-2 py-1 text-[10px] font-semibold"><span class="h-1.5 w-1.5 rounded-full ' + st.dot + '"></span>' + st.text + '</span>'
     + '<button data-action="up" ' + (i === 0 ? "disabled" : "") + ' class="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:text-white disabled:opacity-30" title="上移"><iconify-icon icon="lucide:chevron-up" width="14"></iconify-icon></button>'
@@ -294,11 +368,11 @@ function shotCardHTML(s, i) {
     + (s.first_frame ? '<button data-action="frame-del" class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-red-400/40 hover:text-red-300" title="移除首帧">✕</button>' : '')
     + '</div>'
     + '<div class="mt-2 flex items-center gap-2">'
-    + '<button data-action="voice" class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] py-1.5 text-[11px] text-slate-300 transition hover:border-emerald-400/40 hover:bg-emerald-400/10" title="上传配音/音乐文件，生成时合入视频音轨（Wan2.2 无原生音频，必须用此方式配音）"><iconify-icon icon="lucide:mic" width="13"></iconify-icon>' + (s.voice ? '更换配音' : '上传配音（画外音/音乐）') + '</button>'
+    + '<button data-action="voice" ' + (!needAudio && videoModel !== "Wan2.2 S2V" ? 'disabled ' : '') + 'class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] py-1.5 text-[11px] text-slate-300 transition hover:border-emerald-400/40 hover:bg-emerald-400/10 disabled:cursor-not-allowed disabled:opacity-40" title="' + (videoModel === "Wan2.2 S2V" ? "上传说话语音，S2V 由语音驱动人物说话与动作（必需）" : (!needAudio ? "已关闭「需要音频」，配音不会合入" : "上传配音/音乐文件，生成时合入视频音轨（Wan2.2 无原生音频，必须用此方式配音）")) + '"><iconify-icon icon="lucide:mic" width="13"></iconify-icon>' + (s.voice ? '更换配音' : (videoModel === "Wan2.2 S2V" ? '上传说话语音（S2V 必需）' : '上传配音（画外音/音乐）')) + '</button>'
     + (s.voice ? '<button data-action="voice-del" class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-red-400/40 hover:text-red-300" title="移除配音">✕</button>' : '')
     + '</div>'
     + '<div class="mt-2 flex items-center gap-2">'
-    + '<button data-action="guide" class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] py-1.5 text-[11px] text-slate-300 transition hover:border-amber-400/40 hover:bg-amber-400/10" title="多图参考（H3）：第 1 张为首帧，其余参考图自动锚定到视频不同时间点"><iconify-icon icon="lucide:images" width="13"></iconify-icon>' + (s.guides && s.guides.length ? '参考图 ' + s.guides.length + ' 张 — 再加一张' : '多图参考（H3）') + '</button>'
+    + '<button data-action="guide" class="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] py-1.5 text-[11px] text-slate-300 transition hover:border-amber-400/40 hover:bg-amber-400/10" title="多图参考（H3）：参考图抠主体后作主体定义（<Subject>），不占首帧"><iconify-icon icon="lucide:images" width="13"></iconify-icon>' + (s.guides && s.guides.length ? '参考图 ' + s.guides.length + ' 张 — 再加一张' : '多图参考（H3）') + '</button>'
     + '</div>'
     + (s.guides && s.guides.length
         ? '<div class="mt-2 flex items-center gap-1.5 overflow-x-auto">' + s.guides.map(function (g, gi) {
@@ -307,7 +381,7 @@ function shotCardHTML(s, i) {
               + '<button data-action="guide-del" data-gi="' + gi + '" class="absolute right-0 top-0 flex h-4 w-4 items-center justify-center rounded-bl bg-black/70 text-[9px] text-white">✕</button></div>';
           }).join("") + '</div>'
         : '')
-    + '<label class="mt-2 flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer"><input data-id="' + s.id + '" data-field="auto_match" type="checkbox" class="h-3.5 w-3.5 accent-cyan-400"' + (s.auto_match ? " checked" : "") + '>自动匹配素材图（按提示词检索库文件自动作首帧；已有首帧则跳过）</label>'
+    + '<label class="mt-2 flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer"><input data-id="' + s.id + '" data-field="auto_match" type="checkbox" class="h-3.5 w-3.5 accent-cyan-400"' + (s.auto_match ? " checked" : "") + '>自动匹配素材图（抠主体后作参考，不占首帧；仅 H3，需 ref2va+BiRefNet 模型）</label>'
     + (character.image ? '<label class="mt-2 flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer"><input data-id="' + s.id + '" data-field="use_character_frame" type="checkbox" class="h-3.5 w-3.5 accent-pink-400"' + (s.use_character_frame ? " checked" : "") + '>角色出场（用角色参考图做首帧）</label>' : '')
     + '<button data-action="gen" id="gen_' + s.id + '" ' + (s.status === "busy" ? "disabled" : "") + ' class="mt-3 flex w-full items-center justify-center gap-2 rounded-lg ' + genCls + ' py-2 text-xs font-semibold transition disabled:cursor-not-allowed">' + genBtn + '</button>'
     + '</article>';
@@ -358,6 +432,8 @@ function syncProgress() {
 function selectScene(idx) {
   if (idx < 0 || idx >= scenes.length) return;
   curIdx = idx;
+  var page = Math.floor(idx / PAGE_SIZE);
+  if (page !== curPage) { curPage = page; renderScenes(); }
   document.querySelectorAll(".shot").forEach(function (el) {
     var on = parseInt(el.getAttribute("data-index")) === curIdx;
     el.classList.toggle("ring-1", on);
@@ -368,6 +444,17 @@ function selectScene(idx) {
 
 function prevShot() { if (scenes.length) selectScene((curIdx - 1 + scenes.length) % scenes.length); }
 function nextShot() { if (scenes.length) selectScene((curIdx + 1) % scenes.length); }
+
+function recoverStuckBusy() {
+  var now = Date.now();
+  scenes.forEach(function (s) {
+    if (s.status === "busy" && s.startedAt && now - s.startedAt > 120000) {
+      s.status = "pending";
+      s.startedAt = null;
+      setSceneStatus(s.id);
+    }
+  });
+}
 
 function setSceneStatus(id) {
   var s = scenes.find(function (x) { return x.id === id; });
@@ -409,6 +496,7 @@ function addScene() {
   };
   scenes.push(s);
   curIdx = scenes.length - 1;
+  curPage = Math.floor(curIdx / PAGE_SIZE);
   renderScenes(); renderMonitor(); syncProgress();
   scheduleSaveState();
   toast("已新增镜头 " + (max + 1), "ok");
@@ -417,12 +505,13 @@ function addScene() {
 async function optimize() {
   var text = $("script").value.trim();
   if (!docxB64 && !text) { toast("请先粘贴脚本或上传文档", "err"); return; }
+  var useAI = $("optAI") ? $("optAI").checked : true;
   var btn = $("btnOptimize");
   btn.disabled = true;
-  btn.innerHTML = '<iconify-icon class="animate-spin" icon="lucide:loader-circle" width="16"></iconify-icon>解析中…';
+  btn.innerHTML = '<iconify-icon class="animate-spin" icon="lucide:loader-circle" width="16"></iconify-icon>' + (useAI ? "本地 AI 解析中…" : "解析中…");
   try {
     var append = $("optAppend") ? $("optAppend").checked : false;
-    var payload = docxB64 ? { docx_b64: docxB64, filename: docxFilename, append: append } : { text: text, append: append };
+    var payload = docxB64 ? { docx_b64: docxB64, filename: docxFilename, append: append, ai: useAI } : { text: text, append: append, ai: useAI };
     var r = await api("/api/optimize", payload);
     if (!r.ok) { toast("解析失败：" + (r.error || "未知错误"), "err"); return; }
     var newScenes = (r.scenes || []).map(function (s) { s.output = s.output || null; s.status = "pending"; return s; });
@@ -432,10 +521,12 @@ async function optimize() {
     $("btnReset").classList.remove("hidden");
     $("btnReset").classList.add("flex");
     curIdx = scenes.length ? (append ? scenes.length - newScenes.length : 0) : -1;
+    curPage = Math.floor(curIdx / PAGE_SIZE);
     $("lastSaved").textContent = (append ? "已追加 " : "已解析 ") + newScenes.length + " 个镜头";
     renderScenes(); renderMonitor(); syncProgress();
     $("importPanel").classList.add("hidden");
-    toast((append ? "已追加 " : "解析完成，共 ") + newScenes.length + " 个镜头", "ok");
+    var byAI = r.engine === "ai";
+    toast((append ? "已追加 " : "解析完成，共 ") + newScenes.length + " 个镜头（" + (byAI ? "本地 AI 分镜" : "规则拆分") + "）", "ok");
   } catch (e) {
     toast("解析请求失败：" + e.message, "err");
   } finally {
@@ -446,7 +537,9 @@ async function optimize() {
 
 async function generateScene(id) {
   var s = scenes.find(function (x) { return x.id === id; });
-  if (!s || s.status === "busy") return;
+  if (!s) return;
+  if (s.status === "busy") { toast("该镜头正在生成中，请稍候；若长时间无变化请刷新页面", "err"); return; }
+  if (videoModel === "Wan2.2 S2V" && !s.voice) { toast("S2V 需要说话语音：请先在镜头卡片上传配音（语音驱动画面与动作）", "err"); return; }
   syncScene(id);
   s.status = "busy";
   s.startedAt = Date.now();
@@ -457,7 +550,7 @@ async function generateScene(id) {
   }
   try {
     var r = await api("/api/generate", {
-      scene: { id: s.id, prompt: s.prompt, seconds: s.seconds, subtitle: s.subtitle, shot: s.shot, camera: s.camera, aspect: s.aspect, resolution: s.resolution, mode: s.mode, steps: s.steps, seed: s.seed, negative_prompt: s.negative_prompt || "", first_frame: s.first_frame || null, use_character_frame: !!s.use_character_frame, character: character, model: videoModel, voice: s.voice || null, guides: s.guides || [], auto_match: !!s.auto_match, style_suffix: settings.style_suffix }
+      scene: { id: s.id, prompt: s.prompt, seconds: s.seconds, subtitle: s.subtitle, shot: s.shot, camera: s.camera, aspect: s.aspect, resolution: s.resolution, mode: s.mode, steps: s.steps, seed: s.seed, negative_prompt: s.negative_prompt || "", first_frame: s.first_frame || null, use_character_frame: !!s.use_character_frame, character: character, scene: scene, global_negative_prompt: globalNeg, model: videoModel, voice: s.voice || null, guides: s.guides || [], auto_match: !!s.auto_match, style_suffix: settings.style_suffix, need_audio: needAudio, chain_frames: chainFrames }
     });
     if (s.cancelled) {
       s.cancelled = false;
@@ -466,11 +559,15 @@ async function generateScene(id) {
     } else if (r.ok) {
       s.output = r.file; s.status = "ok";
       if (r.matched && r.matched.name) {
-        toast("已自动匹配素材图：" + r.matched.name + "（已作首帧）", "ok", 6000);
+        toast("已自动匹配素材图：" + r.matched.name + "（已抠主体作参考）", "ok", 6000);
       } else if (r.matched && r.matched.error) {
         toast("自动匹配失败：" + r.matched.error, "err");
+      } else if (r.chained) {
+        toast("镜头 " + s.id + " 生成完成：已用上一镜尾帧作首帧续接", "ok");
+      } else if (r.chain_skip) {
+        toast("镜头 " + s.id + " 生成完成：" + r.chain_skip + "，未续接", "err", 8000);
       } else if (s.auto_match) {
-        toast("未找到匹配的素材图，已按无首帧生成", "ok");
+        toast("未找到匹配的素材图，已按纯文字生成", "ok");
       } else {
         toast("镜头 " + s.id + " 生成完成", "ok");
       }
@@ -524,15 +621,25 @@ function clearFrame(id) {
   toast("已移除首帧，恢复纯文字生成", "ok");
 }
 
-function syncCharButton() {
-  var b = $("btnCharacter");
+function syncGlobalButton() {
+  var b = $("btnGlobal");
   if (!b) return;
-  b.innerHTML = '<iconify-icon icon="lucide:user-round" width="16"></iconify-icon>' + (character.name ? "角色：" + esc(character.name) : "角色固定");
+  var active = !!(character.name || character.description || scene.name || scene.description);
+  b.title = "全局设置" + (character.name ? " · 角色：" + character.name : "") + (scene.name ? " · 场景：" + scene.name : "");
+  b.classList.toggle("bg-cyan-400/15", active);
+  b.classList.toggle("text-cyan-300", active);
 }
 
-function fillCharForm() {
+function fillGlobalForm() {
+  if ($("gblNeedAudio")) $("gblNeedAudio").checked = needAudio;
+  if ($("gblSubtitle")) $("gblSubtitle").checked = subtitleOn;
+  if ($("gblChain")) $("gblChain").checked = chainFrames;
+  if ($("gblBridge")) $("gblBridge").checked = bridgeOn;
   $("charName").value = character.name || "";
   $("charDesc").value = character.description || "";
+  $("sceneName").value = scene.name || "";
+  $("sceneDesc").value = scene.description || "";
+  $("gblNegPrompt").value = globalNeg || "";
   renderCharImage();
 }
 
@@ -543,13 +650,28 @@ function renderCharImage() {
   else { img.classList.add("hidden"); img.removeAttribute("src"); }
 }
 
-async function saveCharacter() {
+async function saveGlobal() {
+  needAudio = $("gblNeedAudio").checked;
+  subtitleOn = $("gblSubtitle").checked;
+  chainFrames = $("gblChain").checked;
+  bridgeOn = $("gblBridge").checked;
+  try {
+    localStorage.setItem("director_need_audio", needAudio ? "1" : "0");
+    localStorage.setItem("director_subtitle", subtitleOn ? "1" : "0");
+    localStorage.setItem("director_chain_frames", chainFrames ? "1" : "0");
+    localStorage.setItem("director_bridge", bridgeOn ? "1" : "0");
+  } catch (e) {}
   character.name = $("charName").value.trim();
   character.description = $("charDesc").value.trim();
+  scene.name = $("sceneName").value.trim();
+  scene.description = $("sceneDesc").value.trim();
+  globalNeg = $("gblNegPrompt").value.trim();
   try {
-    var r = await api("/api/character", { name: character.name, description: character.description, image: character.image });
-    if (r.ok) { toast("角色已保存", "ok"); $("characterPanel").classList.add("hidden"); syncCharButton(); renderScenes(); }
-    else toast("保存失败：" + (r.error || ""), "err");
+    var r1 = await api("/api/character", { name: character.name, description: character.description, image: character.image });
+    var r2 = await api("/api/scene", { name: scene.name, description: scene.description });
+    var r3 = await api("/api/global", { negative_prompt: globalNeg });
+    if (r1.ok && r2.ok && r3.ok) { $("globalPanel").classList.add("hidden"); syncGlobalButton(); renderScenes(); toast("全局设置已保存", "ok"); }
+    else toast("保存失败：" + ((r1.error || r2.error || r3.error) || ""), "err");
   } catch (e) { toast("保存失败：" + e.message, "err"); }
 }
 
@@ -721,10 +843,10 @@ async function concat() {
   var subtitles = [];
   var acc = 0;
   scenes.forEach(function (s, i) {
-    if (s.subtitle && String(s.subtitle).trim()) {
+    if (subtitleOn && s.subtitle && String(s.subtitle).trim()) {
       subtitles.push({ text: String(s.subtitle).trim(), start: acc, end: acc + s.seconds, fontsize: 44, position: "center" });
     }
-    acc += s.seconds + (i < scenes.length - 1 ? BRIDGE_SEC : 0);
+    acc += s.seconds + (bridgeOn && i < scenes.length - 1 ? BRIDGE_SEC : 0);
   });
   var btn = $("btnConcat");
   btn.disabled = true;
@@ -733,8 +855,8 @@ async function concat() {
     btn.innerHTML = '<iconify-icon icon="lucide:film" width="16"></iconify-icon>' + label;
   }
   try {
-    var start = await api("/api/concat", { clips: clips, subtitles: subtitles, bridge: true });
-    if (!start.ok) { toast("合成失败：" + (start.error || "未知错误"), "err"); done("智能合成成片"); return; }
+    var start = await api("/api/concat", { clips: clips, subtitles: subtitles, bridge: bridgeOn, subtitle: subtitleOn, need_audio: needAudio });
+    if (!start.ok) { toast("合成失败：" + (start.error || "未知错误"), "err"); done("合成成片"); return; }
     var timer = setInterval(async function () {
       var d;
       try { d = await api("/api/concat_status"); } catch (e) { return; }
@@ -745,23 +867,27 @@ async function concat() {
         btn.innerHTML = '<iconify-icon class="animate-spin" icon="lucide:loader-circle" width="16"></iconify-icon>' + (st.current || st.stage) + ' ' + pct + '%';
       } else if (st.stage === "done" && st.result) {
         clearInterval(timer);
-        $("finalPanel").classList.remove("hidden");
-        $("finalMeta").textContent = scenes.length + " 个镜头 · " + acc.toFixed(1) + " 秒（含 " + (scenes.length - 1) + " 段补帧过渡）";
-        $("finalBody").innerHTML = '<video class="aspect-video w-full" controls src="/output/' + st.result + '"></video>';
-        $("finalDownload").href = "/output/" + st.result;
-        $("finalDownload").classList.remove("hidden");
-        $("finalPanel").scrollIntoView({ behavior: "smooth", block: "start" });
-        toast("智能合成完成（镜头间已补帧过渡）", "ok");
-        done("智能合成成片");
+        var meta = scenes.length + " 个镜头 · " + acc.toFixed(1) + " 秒" + (bridgeOn ? "（含 " + (scenes.length - 1) + " 段补帧过渡）" : "（无补帧过渡）");
+        $("finalModalMeta").textContent = meta;
+        $("finalModalVideo").src = "/output/" + st.result;
+        $("finalModalDownload").href = "/output/" + st.result;
+        $("finalModal").classList.remove("hidden");
+        $("finalModalVideo").play().catch(function () {});
+        toast("合成完成，成片已弹出", "ok");
+        done("合成成片");
       } else if (st.stage === "error") {
         clearInterval(timer);
         toast("合成失败：" + (st.error || "未知错误"), "err");
-        done("智能合成成片");
+        done("合成成片");
+      } else {
+        clearInterval(timer);
+        toast("合成已中断（服务可能已重启），请重新点击「合成成片」", "err");
+        done("合成成片");
       }
     }, 3000);
   } catch (e) {
     toast("合成请求失败：" + e.message, "err");
-    done("智能合成成片");
+    done("合成成片");
   }
 }
 
@@ -787,14 +913,12 @@ function removeScene(id) {
 }
 
 function reset() {
-  scenes = []; curIdx = -1; docxB64 = null; docxFilename = ""; docxName = "";
+  scenes = []; curIdx = -1; curPage = 0; docxB64 = null; docxFilename = ""; docxName = "";
   $("script").value = "";
   $("docxName").textContent = "";
   $("charCount").textContent = "0 字";
   $("btnReset").classList.add("hidden");
   $("btnReset").classList.remove("flex");
-  $("finalPanel").classList.add("hidden");
-  $("finalBody").innerHTML = "";
   $("lastSaved").textContent = "尚未解析脚本";
   renderScenes(); renderMonitor(); syncProgress();
 }
@@ -856,6 +980,50 @@ async function deleteAsset(path) {
   try {
     var r = await api("/api/assets/delete", { path: path });
     if (r.ok) { toast("已删除", "ok"); loadAssets(); }
+    else { toast("删除失败：" + (r.error || ""), "err"); }
+  } catch (e) { toast("删除失败：" + e.message, "err"); }
+}
+
+async function loadOutputs() {
+  try {
+    var r = await api("/api/outputs");
+    if (!r.ok) { toast("读取保存区失败：" + (r.error || ""), "err"); return; }
+    renderOutputs(r.outputs || []);
+  } catch (e) { toast("读取保存区失败：" + e.message, "err"); }
+}
+
+function renderOutputs(list) {
+  currentOutputs = list || [];
+  var box = $("saved");
+  box.innerHTML = "";
+  $("savedEmpty").classList.toggle("hidden", list.length > 0);
+  $("savedCount").textContent = list.length ? list.length + " 个" : "";
+  list.forEach(function (o) {
+    var div = document.createElement("div");
+    div.innerHTML = outputCardHTML(o);
+    box.appendChild(div.firstElementChild);
+  });
+}
+
+function outputCardHTML(o) {
+  return '<div class="saved-card overflow-hidden rounded-xl border border-white/[0.08] bg-[#1b1b25] transition hover:border-white/20" data-path="' + esc(o.path) + '">'
+    + '<div class="relative aspect-video bg-black">'
+    + '<video class="h-full w-full object-cover" src="/output/' + encodeURI(o.path) + '" preload="metadata" muted playsinline controls></video>'
+    + '<div class="pointer-events-none absolute inset-x-0 bottom-0 flex h-8 items-end bg-gradient-to-t from-black/80 to-transparent p-1.5 text-[10px] text-white/70">' + fmtSize(o.size) + '</div></div>'
+    + '<div class="p-3">'
+    + '<div class="truncate text-xs font-semibold" title="' + esc(o.path) + '">' + esc(o.name) + '</div>'
+    + '<div class="mt-0.5 text-[10px] text-slate-500">' + fmtTime(o.mtime) + '</div>'
+    + '<div class="mt-2 flex items-center gap-2">'
+    + '<a class="flex flex-1 items-center justify-center gap-1 rounded-lg border border-white/10 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-white/[0.06]" href="/output/' + encodeURI(o.path) + '" download><iconify-icon icon="lucide:download" width="13"></iconify-icon>下载</a>'
+    + '<button data-action="saved-del" class="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:border-red-400/40 hover:text-red-300" title="删除"><iconify-icon icon="lucide:trash-2" width="13"></iconify-icon></button>'
+    + '</div></div></div>';
+}
+
+async function deleteOutput(path) {
+  if (!confirm("确定删除 " + path + " ？")) return;
+  try {
+    var r = await api("/api/outputs/delete", { path: path });
+    if (r.ok) { toast("已删除", "ok"); loadOutputs(); }
     else { toast("删除失败：" + (r.error || ""), "err"); }
   } catch (e) { toast("删除失败：" + e.message, "err"); }
 }
@@ -948,7 +1116,14 @@ async function restoreState() {
     var r = await api("/api/state");
     if (r.ok) {
       character = r.character || { name: "", description: "", image: null };
-      syncCharButton();
+      scene = r.scene || { name: "", description: "" };
+      globalNeg = r.global_negative_prompt || "";
+      if (r.project && r.project.name) {
+        var pn = $("projectName");
+        if (pn) { pn.textContent = r.project.name; pn.classList.remove("hidden"); }
+        document.title = r.project.name + " · 导演台";
+      }
+      syncGlobalButton();
     }
     if (r.ok && r.scenes && r.scenes.length) {
       scenes = r.scenes.map(function (s) {
@@ -971,6 +1146,7 @@ async function restoreState() {
         return s;
       });
       curIdx = 0;
+      curPage = 0;
       $("btnReset").classList.remove("hidden");
       $("btnReset").classList.add("flex");
       $("lastSaved").textContent = "已恢复 " + scenes.length + " 个镜头";
@@ -985,12 +1161,21 @@ var GINP = "w-full rounded-md border border-white/10 bg-[#111119] px-2 py-1.5 te
 async function loadGraph() {
   try {
     var r = await api("/api/knowledge");
-    if (r.ok) { graphData = r.graph || { nodes: [], edges: [] }; renderGraph(); }
-    else toast("读取图谱失败：" + (r.error || ""), "err");
-  } catch (e) { toast("读取图谱失败：" + e.message, "err"); }
+    if (r.ok) graphData = r.graph || { nodes: [], edges: [] };
+    else toast("读取剧本图谱失败：" + (r.error || ""), "err");
+  } catch (e) { toast("读取剧本图谱失败：" + e.message, "err"); }
+  try {
+    var r2 = await api("/api/assets/graph");
+    if (r2.ok) assetGraphData = r2.graph || { nodes: [], edges: [] };
+  } catch (e) {}
+  renderGraph();
 }
 
+var graphMode = "script";
+var assetGraphData = { nodes: [], edges: [] };
+
 function renderGraph() {
+  if (graphMode === "assets") { renderAssetGraph(); return; }
   var box = $("graphNodes");
   box.innerHTML = "";
   graphData.nodes.forEach(function (n, i) {
@@ -1004,19 +1189,49 @@ function renderGraph() {
   renderGraphVisual();
 }
 
-var cy = null;
-var TYPE_COLORS = { "景别": "#6d5cff", "运镜": "#22d3ee", "风格": "#f472b6", "结构": "#fbbf24" };
+function renderAssetGraph() {
+  var box = $("assetGraphNodes");
+  box.innerHTML = "";
+  var nodes = assetGraphData.nodes || [];
+  var edges = assetGraphData.edges || [];
+  var assets = nodes.filter(function (n) { return n.type === "asset"; });
+  assets.forEach(function (n) {
+    var tags = edges.filter(function (e) { return e.from === n.id && e.relation === "HAS_TAG"; }).map(function (e) { return e.to.replace(/^tag:/, ""); });
+    var fits = edges.filter(function (e) { return e.from === n.id && e.relation.indexOf("FITS") === 0; }).map(function (e) { return e.to; });
+    var div = document.createElement("div");
+    div.innerHTML = '<div class="rounded-xl border border-white/[0.08] bg-[#1b1b25] p-3">'
+      + '<div class="mb-1 truncate text-xs font-semibold text-violet-300" title="' + esc(n.path || "") + '">' + esc(n.id) + '</div>'
+      + '<div class="mb-1 truncate text-[10px] text-slate-500">' + esc(n.path || "") + '</div>'
+      + '<div class="flex flex-wrap gap-1">'
+      + tags.map(function (t) { return '<span class="rounded-md border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[10px] text-amber-200">' + esc(t) + '</span>'; }).join("")
+      + fits.map(function (f) { return '<span class="rounded-md border border-fuchsia-400/30 bg-fuchsia-400/10 px-1.5 py-0.5 text-[10px] text-fuchsia-200">FITS ' + esc(f) + '</span>'; }).join("")
+      + '</div></div>';
+    box.appendChild(div.firstElementChild);
+  });
+  if (!assets.length) box.innerHTML = '<p class="col-span-full py-6 text-center text-xs text-slate-600">暂无素材图谱，先上传素材并打标签</p>';
+  renderAssetGraphVisual();
+}
 
-function renderGraphVisual() {
+function renderAssetGraphVisual() {
   var container = $("graphCanvas");
   if (!container || !window.cytoscape) return;
   var elements = [];
-  graphData.nodes.forEach(function (n) {
-    elements.push({ data: { id: n.id, label: n.label, color: TYPE_COLORS[n.type] || "#6d5cff", type: n.type || "" } });
+  assetGraphData.nodes.forEach(function (n) {
+    var color = n.type === "tag" ? "#f59e0b" : n.type === "kg" ? "#22d3ee" : "#6d5cff";
+    elements.push({ data: { id: n.id, label: n.label, color: color } });
   });
-  graphData.edges.forEach(function (e, i) {
-    if (e.from && e.to) elements.push({ data: { id: "e" + i, source: e.from, target: e.to, label: e.relation || "" } });
+  assetGraphData.edges.forEach(function (e, i) {
+    if (e.from && e.to) elements.push({ data: { id: "ae" + i, source: e.from, target: e.to, label: e.relation || "" } });
   });
+  drawGraph(elements);
+}
+
+var cy = null;
+var TYPE_COLORS = { "景别": "#6d5cff", "运镜": "#22d3ee", "风格": "#f472b6", "结构": "#fbbf24" };
+
+function drawGraph(elements) {
+  var container = $("graphCanvas");
+  if (!container || !window.cytoscape) return;
   if (cy) { cy.destroy(); }
   cy = window.cytoscape({
     container: container,
@@ -1028,6 +1243,29 @@ function renderGraphVisual() {
     layout: { name: "cose", animate: false, padding: 30, nodeRepulsion: 8000, idealEdgeLength: 100 },
     wheelSensitivity: 0.2,
   });
+}
+
+function renderGraphVisual() {
+  var elements = [];
+  graphData.nodes.forEach(function (n) {
+    elements.push({ data: { id: n.id, label: n.label, color: TYPE_COLORS[n.type] || "#6d5cff", type: n.type || "" } });
+  });
+  graphData.edges.forEach(function (e, i) {
+    if (e.from && e.to) elements.push({ data: { id: "e" + i, source: e.from, target: e.to, label: e.relation || "" } });
+  });
+  drawGraph(elements);
+}
+
+function setGraphMode(mode) {
+  graphMode = mode;
+  var script = mode === "script";
+  $("btnGraphScript").setAttribute("data-active", script ? "1" : "0");
+  $("btnGraphAssets").setAttribute("data-active", script ? "0" : "1");
+  $("graphNodes").classList.toggle("hidden", !script);
+  $("assetGraphNodes").classList.toggle("hidden", script);
+  $("graphScriptTools").classList.toggle("hidden", !script);
+  $("graphEdgesLabel").classList.toggle("hidden", !script);
+  renderGraph();
 }
 
 function graphNodeHTML(n, i) {
@@ -1142,6 +1380,16 @@ $("assets").addEventListener("click", function (e) {
   }
 });
 
+$("saved").addEventListener("click", function (e) {
+  var el = e.target.closest("[data-action]");
+  if (el) {
+    var card = el.closest(".saved-card");
+    if (!card) return;
+    var a = el.getAttribute("data-action");
+    if (a === "saved-del") deleteOutput(card.getAttribute("data-path"));
+  }
+});
+
 // 顶部/面板按钮
 $("btnImport").addEventListener("click", function () {
   $("importPanel").classList.toggle("hidden");
@@ -1151,13 +1399,30 @@ $("btnImportClose").addEventListener("click", function () { $("importPanel").cla
 $("btnAssets").addEventListener("click", function () {
   var p = $("assetPanel");
   p.classList.toggle("hidden");
-  if (!p.classList.contains("hidden")) loadAssets();
+  if (!p.classList.contains("hidden")) { loadAssets(); loadAssetsTags(); }
 });
 $("btnAssetRefresh").addEventListener("click", loadAssets);
+$("btnAssetUpload").addEventListener("click", uploadAsset);
+$("btnSaved").addEventListener("click", function () {
+  var p = $("savedPanel");
+  p.classList.toggle("hidden");
+  if (!p.classList.contains("hidden")) loadOutputs();
+});
+$("btnSavedRefresh").addEventListener("click", loadOutputs);
 $("btnOptimize").addEventListener("click", optimize);
 $("btnAddScene").addEventListener("click", addScene);
 $("btnConcat").addEventListener("click", concat);
 $("btnReset").addEventListener("click", reset);
+$("btnPagePrev").addEventListener("click", function () { if (curPage > 0) { curPage -= 1; renderScenes(); } });
+$("timeline").addEventListener("click", function (e) {
+  var el = e.target.closest("[data-idx]");
+  if (el) selectScene(parseInt(el.getAttribute("data-idx")));
+});
+$("btnPageNext").addEventListener("click", function () { if (curPage < Math.ceil(scenes.length / PAGE_SIZE) - 1) { curPage += 1; renderScenes(); } });
+$("btnFinalClose").addEventListener("click", function () {
+  $("finalModal").classList.add("hidden");
+  $("finalModalVideo").pause();
+});
 $("btnPrev").addEventListener("click", prevShot);
 $("btnNext").addEventListener("click", nextShot);
 $("btnGenAll").addEventListener("click", generateAll);
@@ -1182,6 +1447,8 @@ $("themePicker").addEventListener("click", function (e) {
   applyTheme();
 });
 $("btnGraph").addEventListener("click", function () { $("graphPanel").classList.remove("hidden"); loadGraph(); });
+$("btnGraphScript").addEventListener("click", function () { setGraphMode("script"); });
+$("btnGraphAssets").addEventListener("click", function () { setGraphMode("assets"); });
 $("btnGraphClose").addEventListener("click", function () { $("graphPanel").classList.add("hidden"); });
 $("btnGraphAdd").addEventListener("click", addGraphNode);
 $("btnGraphSave").addEventListener("click", saveGraph);
@@ -1197,9 +1464,9 @@ $("videoModelSel").addEventListener("change", function () {
   if (scenes[curIdx]) renderMonitor();
   toast("模型已切换：" + videoModel + "（各镜头步数已按档位重算）", "ok");
 });
-$("btnCharacter").addEventListener("click", function () { fillCharForm(); $("characterPanel").classList.remove("hidden"); });
-$("btnCharacterClose").addEventListener("click", function () { $("characterPanel").classList.add("hidden"); });
-$("btnCharacterSave").addEventListener("click", saveCharacter);
+$("btnGlobal").addEventListener("click", function () { fillGlobalForm(); $("globalPanel").classList.remove("hidden"); });
+$("btnGlobalClose").addEventListener("click", function () { $("globalPanel").classList.add("hidden"); });
+$("btnGlobalSave").addEventListener("click", saveGlobal);
 $("btnCharImage").addEventListener("click", uploadCharImage);
 $("btnCharImageDel").addEventListener("click", delCharImage);
 document.addEventListener("click", function (e) {
@@ -1243,6 +1510,7 @@ async function checkComfy() {
       dot.className = "h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_#34d399]";
       st.textContent = "ComfyUI 在线 · 运行 " + r.running + " / 排队 " + r.pending;
       st.className = "text-slate-400";
+      if (!r.running && !r.pending) recoverStuckBusy();
     } else {
       dot.className = "h-2 w-2 rounded-full bg-red-400";
       st.textContent = "ComfyUI 未连接";
@@ -1269,6 +1537,7 @@ setInterval(function () {
 
 loadSettings();
 loadVideoModel();
+loadToggles();
 restoreState();
 checkComfy();
 setInterval(checkComfy, 15000);

@@ -22,6 +22,7 @@ for %%f in (requirements.txt manager_requirements.txt pyproject.toml pytest.ini 
   if exist "%%f" copy "%%f" "%STAGE%" >nul
 )
 copy *.md "%STAGE%" >nul
+copy *.bat "%STAGE%" >nul
 
 if exist "user\default\workflows" robocopy "user\default\workflows" "%STAGE%\workflows" /E /NFL /NDL /NJH /NJS /NP >nul
 for %%f in (migration\*.bat migration\*.md) do copy "%%f" "%STAGE%" >nul

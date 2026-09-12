@@ -7,15 +7,16 @@
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
 <script src="/static/vendor/tailwind.js"></script>
 <script src="/static/vendor/iconify-icon.min.js"></script>
+<script src="/static/vendor/lucide-icons.js"></script>
 <script src="/static/vendor/cytoscape.min.js"></script>
 <style>
 :root, [data-theme="violet"] {
-  --accent1:#6d5cff; --accent2:#a855f7;
-  --t300:#c4b5fd; --t200:#ddd6fe; --t100:#ede9fe; --f300:#f0abfc;
-  --b60:rgba(167,139,250,.6); --b40:rgba(167,139,250,.4); --b30:rgba(167,139,250,.3); --b20:rgba(167,139,250,.2);
-  --bg15:rgba(139,92,246,.15); --bg10:rgba(167,139,250,.1); --bg20:rgba(167,139,250,.2);
-  --fbs15:rgba(217,70,239,.15); --ring60:rgba(139,92,246,.6); --sh:rgba(76,29,149,.3);
-  --glow1:rgba(109,92,255,.12); --glow2:rgba(168,85,247,.08);
+  --accent1:#22d3ee; --accent2:#0891b2;
+  --t300:#67e8f9; --t200:#a5f3fc; --t100:#cffafe; --f300:#67e8f9;
+  --b60:rgba(34,211,238,.6); --b40:rgba(34,211,238,.4); --b30:rgba(34,211,238,.3); --b20:rgba(34,211,238,.2);
+  --bg15:rgba(34,211,238,.15); --bg10:rgba(34,211,238,.1); --bg20:rgba(34,211,238,.2);
+  --fbs15:rgba(34,211,238,.15); --ring60:rgba(34,211,238,.6); --sh:rgba(8,51,68,.3);
+  --glow1:rgba(34,211,238,.12); --glow2:rgba(8,145,178,.08);
 }
 [data-theme="ocean"] {
   --accent1:#0ea5e9; --accent2:#22d3ee;
@@ -70,42 +71,49 @@
 [class~="focus:border-violet-400/60"]:focus { border-color: var(--b60) !important; }
 .theme-swatch { border-color: rgba(255,255,255,.1); }
 .theme-swatch[data-active="1"] { border-color: var(--t300); color:#fff; background-color: var(--bg15); }
+.graph-tab[data-active="1"] { background-color: var(--bg15); color: var(--t300); }
 </style>
 </head>
-<body class="w-full min-h-screen m-0 overflow-x-hidden bg-[#0b0b11] font-sans text-slate-100 antialiased">
-<div class="min-h-screen" style="background-image:radial-gradient(circle at 15% 0%,var(--glow1),transparent 30%),radial-gradient(circle at 90% 10%,var(--glow2),transparent 26%);">
+<body class="w-full min-h-screen m-0 overflow-x-hidden bg-[#0b0b11] font-sans text-slate-100 antialiased lg:h-screen lg:overflow-hidden">
+<div class="min-h-screen lg:flex lg:h-screen lg:flex-col" style="background-image:radial-gradient(circle at 15% 0%,var(--glow1),transparent 30%),radial-gradient(circle at 90% 10%,var(--glow2),transparent 26%);">
 
-<header class="sticky top-0 z-20 border-b border-white/[0.08] bg-[#0b0b11]/95 backdrop-blur-xl">
+<header class="sticky top-0 z-20 shrink-0 border-b border-white/10 bg-[#0d1019]/95 backdrop-blur-xl">
   <div class="mx-auto flex max-w-[1600px] items-center justify-between gap-4 px-5 py-4 lg:px-8">
     <div class="flex min-w-0 items-center gap-3">
-      <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-[#6d5cff] to-[#a855f7] shadow-lg shadow-violet-900/30"><iconify-icon height="22" icon="lucide:clapperboard" stroke-width="1.8" width="22"></iconify-icon></div>
+      <a href="/" title="返回首页 · 项目选择" class="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-cyan-400 text-[#08101c] shadow-lg shadow-cyan-500/20 transition hover:brightness-110"><iconify-icon height="24" icon="lucide:clapperboard" width="24"></iconify-icon></a>
       <div class="min-w-0">
-        <div class="flex items-center gap-2"><h1 class="truncate text-lg font-bold tracking-tight">导演台</h1><span class="rounded-md border border-violet-400/20 bg-violet-400/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-violet-300">Studio 01</span></div>
+        <div class="flex items-center gap-2"><h1 class="truncate text-lg font-bold tracking-tight">导演台</h1><span class="rounded-md border border-violet-400/20 bg-violet-400/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-violet-300">Studio 01</span><span id="projectName" class="hidden rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-slate-400"></span></div>
         <p class="truncate text-xs text-slate-500">脚本 → 分镜 → MiniMax H3 成片</p>
       </div>
     </div>
-    <div class="hidden items-center gap-2 xl:flex">
-      <button id="btnImport" class="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2 text-sm text-slate-300 transition hover:border-violet-400/40 hover:bg-violet-400/10"><iconify-icon icon="lucide:file-input" width="16"></iconify-icon>导入脚本</button>
-      <button id="btnCharacter" class="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2 text-sm text-slate-300 transition hover:border-pink-400/40 hover:bg-pink-400/10"><iconify-icon icon="lucide:user-round" width="16"></iconify-icon>角色固定</button>
-      <button id="btnAssets" class="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2 text-sm text-slate-300 transition hover:border-violet-400/40 hover:bg-violet-400/10"><iconify-icon icon="lucide:folder-open" width="16"></iconify-icon>素材库</button>
-      <button id="btnSettings" class="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2 text-sm text-slate-300 transition hover:border-violet-400/40 hover:bg-violet-400/10"><iconify-icon icon="lucide:settings" width="16"></iconify-icon>设置</button>
-      <button id="btnGraph" class="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2 text-sm text-slate-300 transition hover:border-violet-400/40 hover:bg-violet-400/10"><iconify-icon icon="lucide:network" width="16"></iconify-icon>图谱</button>
-      <button id="btnConcat" disabled class="flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#6d5cff] to-[#a855f7] px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-violet-900/20 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"><iconify-icon icon="lucide:film" width="16"></iconify-icon>智能合成成片</button>
-      <div class="ml-2 flex items-center gap-2 border-l border-white/10 pl-4 text-xs text-slate-400"><span id="comfyDot" class="h-2 w-2 rounded-full bg-slate-500"></span><span id="comfyStatus">检测 ComfyUI…</span></div>
+    <div class="flex shrink-0 items-center gap-2">
+      <button id="btnConcat" disabled class="flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-[#08101c] shadow-lg shadow-cyan-500/20 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"><iconify-icon icon="lucide:film" width="16"></iconify-icon>合成成片</button>
+      <div class="ml-2 hidden items-center gap-2 border-l border-white/10 pl-4 text-xs text-slate-400 sm:flex"><span id="comfyDot" class="h-2 w-2 rounded-full bg-slate-500"></span><span id="comfyStatus">检测 ComfyUI…</span></div>
     </div>
   </div>
 </header>
 
-<main class="mx-auto max-w-[1600px] space-y-5 px-5 py-5 lg:px-8 lg:py-7">
+<div class="flex min-h-0 lg:flex-1">
+  <aside class="flex w-[72px] shrink-0 flex-col items-center border-r border-white/10 bg-[#0d1019] py-4">
+    <a href="/" title="项目首页" class="mb-3 grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition hover:bg-white/5"><iconify-icon icon="lucide:folder-open" width="22"></iconify-icon></a>
+    <button id="btnImport" title="导入脚本" class="mb-3 grid h-11 w-11 place-items-center rounded-xl bg-cyan-400 text-[#08101c] transition hover:brightness-110"><iconify-icon icon="lucide:file-input" width="22"></iconify-icon></button>
+    <button id="btnGlobal" title="全局设置" class="mb-3 grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition hover:bg-white/5 hover:text-slate-200"><iconify-icon icon="lucide:settings-2" width="22"></iconify-icon></button>
+    <button id="btnAssets" title="素材库" class="mb-3 grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition hover:bg-white/5 hover:text-slate-200"><iconify-icon icon="lucide:images" width="22"></iconify-icon></button>
+    <button id="btnSaved" title="保存区" class="mb-3 grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition hover:bg-white/5 hover:text-slate-200"><iconify-icon icon="lucide:download" width="22"></iconify-icon></button>
+    <button id="btnGraph" title="知识图谱" class="mb-3 grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition hover:bg-white/5 hover:text-slate-200"><iconify-icon icon="lucide:network" width="22"></iconify-icon></button>
+    <div class="mt-auto"><button id="btnSettings" title="设置" class="grid h-11 w-11 place-items-center rounded-xl text-slate-500 transition hover:bg-white/5 hover:text-slate-200"><iconify-icon icon="lucide:settings" width="22"></iconify-icon></button></div>
+  </aside>
+
+<main class="mx-auto w-full min-w-0 max-w-[1600px] flex-1 space-y-5 px-5 py-5 lg:flex lg:min-h-0 lg:flex-col lg:space-y-4 lg:overflow-hidden lg:px-6 lg:py-4">
 
   <div id="importPanel" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
   <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" data-close="importPanel"></div>
-  <div class="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-2xl border border-white/[0.09] bg-[#16161f] p-5 shadow-2xl">
+  <div class="relative w-full max-w-5xl max-h-[92vh] overflow-y-auto rounded-2xl border border-white/[0.09] bg-[#16161f] p-6 shadow-2xl">
     <div class="mb-3 flex items-center justify-between">
       <div class="flex items-center gap-2"><span class="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/15 text-violet-300"><iconify-icon icon="lucide:file-text" width="17"></iconify-icon></span><h3 class="font-semibold">脚本输入</h3></div>
       <button id="btnImportClose" class="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:text-white" title="收起">−</button>
     </div>
-    <textarea id="script" class="min-h-[140px] w-full resize-y rounded-xl border border-white/10 bg-black/20 p-3 text-sm leading-6 text-slate-200 outline-none placeholder:text-slate-600 focus:border-violet-400/60" placeholder="粘贴脚本，例如分镜表：&#10;时间 | 画面 | 台词/文案 | 音效/BGM&#10;0-5s | 特写手敲键盘 | 画外音：深夜赶稿 | 键盘声&#10;5-10s | 窗外霓虹夜色 | 画外音：总有人，在偷偷爱着你 | 环境音"></textarea>
+    <textarea id="script" class="min-h-[320px] w-full resize-y rounded-xl border border-white/10 bg-black/20 p-3 text-sm leading-6 text-slate-200 outline-none placeholder:text-slate-600 focus:border-violet-400/60" placeholder="粘贴脚本，例如分镜表：&#10;时间 | 画面 | 台词/文案 | 音效/BGM&#10;0-5s | 特写手敲键盘 | 画外音：深夜赶稿 | 键盘声&#10;5-10s | 窗外霓虹夜色 | 画外音：总有人，在偷偷爱着你 | 环境音"></textarea>
     <div class="mt-2 flex items-center justify-between text-xs text-slate-500"><span id="charCount">0 字</span><span id="docxName"></span></div>
     <div class="mt-3 flex items-center gap-2">
       <input id="scriptTopic" type="text" class="flex-1 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-600 focus:border-violet-400/60" placeholder="🤖 一句话创意，剧本大脑自动生成分镜脚本（本地知识图谱 + DeepSeek）">
@@ -115,66 +123,82 @@
       <input type="file" id="docx" accept=".md,.xls,.doc,.docx" class="hidden"/>
       <button id="btnDocx" class="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2 text-sm text-slate-300 transition hover:border-violet-400/40 hover:bg-violet-400/10"><iconify-icon icon="lucide:upload" width="16"></iconify-icon>上传文档</button>
       <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer"><input id="optAppend" type="checkbox" class="h-3.5 w-3.5 accent-violet-400">追加到现有分镜（不覆盖）</label>
+      <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer" title="用本机 Ollama 把剧本拆成分镜，离线可用；模型不可用时自动改为按格式拆分"><input id="optAI" type="checkbox" class="h-3.5 w-3.5 accent-violet-400" checked>本地 AI 解析分镜</label>
       <button id="btnOptimize" class="flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#6d5cff] to-[#a855f7] px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-violet-900/20 transition hover:brightness-110"><iconify-icon icon="lucide:sparkles" width="16"></iconify-icon>解析分镜</button>
       <button id="btnReset" class="hidden items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2 text-sm text-slate-300 transition hover:text-white">清空</button>
     </div>
-    <p class="mt-3 text-xs text-slate-600">支持分镜表 / 纯文字 / 一句话 / .md .xls .doc .docx 文档。解析后拆成分镜卡片，可逐镜修改景别、运镜、时长等导演参数。Ctrl+Enter 快捷解析。</p>
+    <p class="mt-3 text-xs text-slate-600">支持分镜表 / 纯文字 / 一句话 / .md .xls .doc .docx 文档。勾选「本地 AI 解析分镜」时由本机 Ollama 拆镜（离线可用，纯文字剧本约 30 秒），未勾选或本机没有对话模型时按格式规则拆分。解析后拆成分镜卡片，可逐镜修改景别、运镜、时长等导演参数。Ctrl+Enter 快捷解析。</p>
   </div>
 </div>
 
-  <div class="flex flex-wrap items-end justify-between gap-3">
+  <div class="flex shrink-0 flex-wrap items-end justify-between gap-3">
     <div><p class="mb-1 text-xs font-semibold uppercase tracking-[0.22em] text-violet-300">PROJECT / SCRIPT TO VIDEO</p><h2 class="text-2xl font-bold tracking-tight lg:text-3xl">AI 视频导演台<span class="ml-3 text-sm font-normal text-slate-500">导演控制台</span></h2></div>
     <div class="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-[#16161f] px-3 py-2 text-xs text-slate-400"><iconify-icon icon="lucide:clock-3" width="15"></iconify-icon><span id="lastSaved">尚未解析脚本</span></div>
   </div>
 
-  <section class="grid items-start gap-5 xl:grid-cols-[minmax(380px,0.88fr)_minmax(680px,1.5fr)]">
-    <aside class="rounded-2xl border border-white/[0.09] bg-[#16161f] p-4 shadow-2xl shadow-black/20 lg:p-5 xl:sticky xl:top-24">
-      <div class="mb-4 flex items-center justify-between">
-        <div class="flex items-center gap-2"><span class="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/15 text-violet-300"><iconify-icon icon="lucide:monitor-play" width="17"></iconify-icon></span><h3 class="font-semibold">监视器</h3></div>
-        <span class="flex items-center gap-1.5 text-xs text-slate-500"><span id="monitorModeDot" class="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400"></span>预览模式</span>
+  <section class="grid items-stretch gap-5 lg:min-h-0 lg:flex-1 lg:grid-cols-2">
+    <aside class="flex flex-col rounded-2xl border border-white/10 bg-[#111520] shadow-2xl shadow-black/20 lg:min-h-0 lg:overflow-hidden">
+      <div class="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-5 py-4">
+        <div><p class="text-xs text-violet-300">AI 导演</p><h3 class="mt-1 font-semibold">监视器</h3></div>
+        <span class="flex items-center gap-1.5 rounded-full bg-emerald-400/10 px-2.5 py-1 text-[11px] text-emerald-300"><span id="monitorModeDot" class="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"></span>实时预览</span>
       </div>
-      <div class="relative aspect-video overflow-hidden rounded-xl border border-white/10 bg-black">
-        <video id="monitorVideo" class="hidden h-full w-full object-contain" controls autoplay muted loop playsinline></video>
-        <div id="monitorEmpty" class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-600">
-          <iconify-icon icon="lucide:clapperboard" width="42"></iconify-icon>
-          <p id="monitorEmptyText" class="px-6 text-center text-sm">解析脚本后，点选分镜在此预览</p>
+      <div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-5">
+        <div class="relative aspect-video w-full shrink-0 overflow-hidden rounded-xl border border-white/10 bg-black lg:grow">
+          <video id="monitorVideo" class="hidden h-full w-full object-contain" controls autoplay muted loop playsinline></video>
+          <div id="monitorEmpty" class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-slate-600">
+            <iconify-icon icon="lucide:clapperboard" width="42"></iconify-icon>
+            <p id="monitorEmptyText" class="px-6 text-center text-sm">解析脚本后，点选分镜在此预览</p>
+          </div>
         </div>
-      </div>
-      <div class="mt-4 flex items-center justify-between gap-2">
-        <button id="btnPrev" class="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 py-2.5 text-sm text-slate-300 transition hover:bg-white/[0.06]"><iconify-icon icon="lucide:chevron-left" width="17"></iconify-icon>上一镜</button>
-        <button id="btnNext" class="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 py-2.5 text-sm text-slate-300 transition hover:bg-white/[0.06]">下一镜<iconify-icon icon="lucide:chevron-right" width="17"></iconify-icon></button>
-      </div>
-      <div class="my-5 border-t border-white/[0.08]"></div>
-      <div class="grid grid-cols-2 gap-4">
-        <div><p class="text-xs text-slate-500">当前镜头</p><p id="monitorShot" class="mt-1 text-sm font-semibold">—</p></div>
-        <div><p class="text-xs text-slate-500">镜头规格</p><p id="monitorSpec" class="mt-1 text-sm font-semibold">—</p></div>
-      </div>
-      <p class="mt-2 text-xs text-slate-500">输出分辨率 <span id="monitorRes" class="text-slate-300">—</span></p>
-      <div class="mt-6">
-        <div class="mb-2 flex items-center justify-between text-xs"><span class="font-medium text-slate-300">整体生成进度</span><span id="progressText" class="font-bold text-violet-300">0 / 0</span></div>
-        <div class="h-2 overflow-hidden rounded-full bg-white/[0.07]"><div id="progressBar" class="h-full w-0 rounded-full bg-gradient-to-r from-[#6d5cff] to-[#a855f7] transition-all duration-300"></div></div>
-      </div>
-      <div class="mt-5 flex gap-2">
-        <button id="btnGenAll" class="flex flex-1 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#6d5cff] to-[#a855f7] py-3 text-sm font-bold text-white shadow-xl shadow-violet-950/30 transition hover:brightness-110"><iconify-icon icon="lucide:play-circle" width="18"></iconify-icon>生成剩余全部</button>
-        <button id="btnPause" class="hidden items-center justify-center gap-2 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm font-semibold text-amber-200 transition hover:bg-amber-400/20"><iconify-icon icon="lucide:pause" width="16"></iconify-icon>暂停</button>
-        <button id="btnCancel" class="hidden items-center justify-center gap-2 rounded-xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm font-semibold text-red-200 transition hover:bg-red-400/20"><iconify-icon icon="lucide:x-circle" width="16"></iconify-icon>取消当前</button>
-        <button id="btnStop" class="hidden items-center justify-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-sm font-semibold text-slate-300 transition hover:bg-white/[0.06]">■</button>
+        <div class="mt-4 flex items-center justify-between gap-2">
+          <button id="btnPrev" class="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 py-2.5 text-sm text-slate-300 transition hover:bg-white/[0.06]"><iconify-icon icon="lucide:chevron-left" width="17"></iconify-icon>上一镜</button>
+          <button id="btnNext" class="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 py-2.5 text-sm text-slate-300 transition hover:bg-white/[0.06]">下一镜<iconify-icon icon="lucide:chevron-right" width="17"></iconify-icon></button>
+        </div>
+        <div class="mt-4 grid grid-cols-2 gap-4">
+          <div><p class="text-xs text-slate-500">当前镜头</p><p id="monitorShot" class="mt-1 text-sm font-semibold">—</p></div>
+          <div><p class="text-xs text-slate-500">镜头规格</p><p id="monitorSpec" class="mt-1 text-sm font-semibold">—</p></div>
+        </div>
+        <p class="mt-2 text-xs text-slate-500">输出分辨率 <span id="monitorRes" class="text-slate-300">—</span></p>
+        <div class="mt-5">
+          <div class="mb-2 flex items-center justify-between text-xs"><span class="font-medium text-slate-300">整体生成进度</span><span id="progressText" class="font-bold text-violet-300">0 / 0</span></div>
+          <div class="h-2 overflow-hidden rounded-full bg-white/[0.07]"><div id="progressBar" class="h-full w-0 rounded-full bg-gradient-to-r from-[#6d5cff] to-[#a855f7] transition-all duration-300"></div></div>
+        </div>
+        <div class="mt-4 flex gap-2">
+          <button id="btnGenAll" class="flex flex-1 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#6d5cff] to-[#a855f7] py-3 text-sm font-bold text-white shadow-xl shadow-violet-950/30 transition hover:brightness-110"><iconify-icon icon="lucide:play-circle" width="18"></iconify-icon>生成剩余全部</button>
+          <button id="btnPause" class="hidden items-center justify-center gap-2 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm font-semibold text-amber-200 transition hover:bg-amber-400/20"><iconify-icon icon="lucide:pause" width="16"></iconify-icon>暂停</button>
+          <button id="btnCancel" class="hidden items-center justify-center gap-2 rounded-xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm font-semibold text-red-200 transition hover:bg-red-400/20"><iconify-icon icon="lucide:x-circle" width="16"></iconify-icon>取消当前</button>
+          <button id="btnStop" class="hidden items-center justify-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-sm font-semibold text-slate-300 transition hover:bg-white/[0.06]">■</button>
+        </div>
       </div>
     </aside>
 
-    <section class="rounded-2xl border border-white/[0.09] bg-[#16161f] p-4 lg:p-5">
-      <div class="mb-4 flex items-center justify-between">
-        <div class="flex items-center gap-2"><span class="flex h-8 w-8 items-center justify-center rounded-lg bg-fuchsia-500/15 text-fuchsia-300"><iconify-icon icon="lucide:layout-grid" width="17"></iconify-icon></span><h3 class="font-semibold">分镜台</h3><span id="shotCount" class="rounded-full bg-white/[0.06] px-2 py-0.5 text-[11px] text-slate-500"></span></div>
-        <div class="flex items-center gap-3">
-          <button id="btnAddScene" class="flex items-center gap-1.5 rounded-md border border-fuchsia-400/30 bg-fuchsia-400/10 px-2.5 py-1.5 text-xs font-semibold text-fuchsia-200 transition hover:bg-fuchsia-400/20"><iconify-icon icon="lucide:plus" width="14"></iconify-icon>新增镜头</button>
-          <label class="flex items-center gap-1.5 text-xs text-slate-500">模型<select id="videoModelSel" class="rounded-md border border-white/10 bg-[#111119] px-1.5 py-1 text-[11px] font-semibold text-fuchsia-200 outline-none focus:border-fuchsia-400/60"><option value="MiniMax H3">MiniMax H3</option><option value="Wan2.2 5B">Wan2.2 5B</option><option value="Wan2.2 14B">Wan2.2 14B</option></select></label>
-          <span class="hidden items-center gap-1.5 text-xs text-slate-500 lg:flex"><iconify-icon icon="lucide:mouse-pointer-click" width="14"></iconify-icon>点选卡片在监视器预览</span>
+    <section class="flex flex-col rounded-2xl border border-white/10 bg-[#111520] shadow-2xl shadow-black/20 lg:min-h-0 lg:overflow-hidden">
+      <div class="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-5 py-4">
+        <div><p class="text-xs text-fuchsia-300">Storyboard</p><div class="mt-1 flex items-center gap-2"><h3 class="font-semibold">分镜台</h3><span id="shotCount" class="rounded-full bg-white/[0.06] px-2 py-0.5 text-[11px] text-slate-500"></span></div></div>
+        <button id="btnAddScene" class="flex items-center gap-1.5 rounded-lg bg-cyan-400 px-3 py-2 text-xs font-semibold text-[#08101c] transition hover:brightness-110"><iconify-icon icon="lucide:plus" width="14"></iconify-icon>新增镜头</button>
+      </div>
+      <div class="flex shrink-0 flex-wrap items-center gap-3 border-b border-white/[0.08] px-5 py-2.5">
+        <label class="flex items-center gap-1.5 text-xs text-slate-500">模型<select id="videoModelSel" class="rounded-md border border-white/10 bg-[#111119] px-1.5 py-1 text-[11px] font-semibold text-fuchsia-200 outline-none focus:border-fuchsia-400/60"><option value="MiniMax H3">MiniMax H3</option><option value="Wan2.2 5B">Wan2.2 5B</option><option value="Wan2.2 14B">Wan2.2 14B</option><option value="Wan2.2 S2V">Wan2.2 S2V</option></select></label>
+        <span class="flex items-center gap-1.5 text-xs text-slate-500"><iconify-icon icon="lucide:settings-2" width="13"></iconify-icon>音频/字幕/角色/场景在「全局设置」中配置</span>
+      </div>
+      <div class="shrink-0 border-b border-white/[0.08] px-5 py-3">
+        <div id="timeline" class="hidden rounded-lg border border-white/[0.08] bg-[#1b1b25] px-3 py-2">
+          <div class="flex items-center justify-between text-[10px] text-slate-500"><span>时间线 · <span id="timelineTotal">0 秒</span></span><span>画面 / 字幕 · 点击跳转镜头</span></div>
+          <div id="trackVideo" class="mt-1.5 flex h-5 w-full overflow-hidden rounded"></div>
+          <div id="trackSub" class="mt-1 flex h-3 w-full overflow-hidden rounded"></div>
         </div>
       </div>
-      <div id="scenes" class="grid gap-3 2xl:grid-cols-2"></div>
-      <div id="scenesEmpty" class="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-white/10 py-16 text-slate-600">
-        <iconify-icon icon="lucide:clapperboard" width="42"></iconify-icon>
-        <p class="text-sm">点击顶部「导入脚本」粘贴脚本并解析，分镜将显示在这里</p>
+      <div id="scenePager" class="hidden shrink-0 items-center justify-between px-5 py-2.5 text-xs text-slate-400">
+        <button id="btnPagePrev" class="flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 transition hover:bg-white/[0.06] disabled:opacity-30">← 上一面</button>
+        <span id="pageInfo" class="font-semibold text-slate-300">第 1 / 1 面</span>
+        <button id="btnPageNext" class="flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 transition hover:bg-white/[0.06] disabled:opacity-30">下一面 →</button>
+      </div>
+      <div class="min-h-0 flex-1 overflow-y-auto p-4">
+        <div id="scenes" class="grid gap-3"></div>
+        <div id="scenesEmpty" class="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-white/10 py-16 text-slate-600">
+          <iconify-icon icon="lucide:clapperboard" width="42"></iconify-icon>
+          <p class="text-sm">点击顶部「导入脚本」粘贴脚本并解析，分镜将显示在这里</p>
+        </div>
       </div>
     </section>
   </section>
@@ -200,13 +224,34 @@
   </div>
 </div>
 
-  <section id="finalPanel" class="hidden rounded-2xl border border-white/[0.09] bg-[#16161f] p-4 lg:p-5">
-    <div class="flex flex-wrap items-center justify-between gap-3">
-      <div class="flex items-center gap-2"><span class="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-300"><iconify-icon icon="lucide:check-circle-2" width="17"></iconify-icon></span><div><h3 class="font-semibold">成片</h3><p id="finalMeta" class="text-xs text-slate-500"></p></div></div>
-      <div class="flex items-center gap-2"><a id="finalDownload" class="hidden rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.06]" href="#" download>⬇ 下载成片</a></div>
+  <div id="savedPanel" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" data-close="savedPanel"></div>
+  <div class="relative w-full max-w-6xl max-h-[85vh] overflow-y-auto rounded-2xl border border-white/[0.09] bg-[#16161f] p-5 shadow-2xl">
+    <div class="mb-4 flex items-center justify-between">
+      <div class="flex items-center gap-2"><span class="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-300"><iconify-icon icon="lucide:download" width="17"></iconify-icon></span><h3 class="font-semibold">保存区</h3><span id="savedCount" class="rounded-full bg-white/[0.06] px-2 py-0.5 text-[11px] text-slate-500"></span></div>
+      <button id="btnSavedRefresh" class="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.06]"><iconify-icon icon="lucide:refresh-cw" width="14"></iconify-icon>刷新</button>
     </div>
-    <div id="finalBody" class="mt-4 overflow-hidden rounded-xl border border-white/[0.08] bg-black/70"></div>
-  </section>
+    <div id="saved" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"></div>
+    <div id="savedEmpty" class="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-white/10 py-12 text-slate-600">
+      <iconify-icon icon="lucide:download" width="36"></iconify-icon>
+      <p class="text-sm">暂无保存的成片/镜头视频，生成后会自动出现在这里</p>
+    </div>
+  </div>
+</div>
+
+  <div id="finalModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/80 backdrop-blur-sm" data-close="finalModal"></div>
+  <div class="relative w-full max-w-4xl overflow-y-auto rounded-2xl border border-white/[0.09] bg-[#16161f] p-5 shadow-2xl">
+    <div class="mb-4 flex items-center justify-between">
+      <div class="flex items-center gap-2"><span class="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-300"><iconify-icon icon="lucide:film" width="17"></iconify-icon></span><div><h3 class="font-semibold">成片已生成</h3><p id="finalModalMeta" class="text-xs text-slate-500"></p></div></div>
+      <div class="flex items-center gap-2">
+        <a id="finalModalDownload" class="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.06]" href="#" download><iconify-icon icon="lucide:download" width="14"></iconify-icon>下载成片</a>
+        <button id="btnFinalClose" class="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:text-white" title="关闭">✕</button>
+      </div>
+    </div>
+    <video id="finalModalVideo" class="aspect-video w-full rounded-xl border border-white/10 bg-black" controls autoplay playsinline></video>
+  </div>
+</div>
 
   <div id="settingsPanel" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
   <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" data-close="settingsPanel"></div>
@@ -240,7 +285,7 @@
     <div class="mt-4 rounded-xl border border-white/[0.08] bg-[#1b1b25] p-3.5">
       <h4 class="mb-2 text-sm font-semibold text-slate-200">🎨 界面主题</h4>
       <div id="themePicker" class="flex flex-wrap items-center gap-2">
-        <button type="button" data-theme="violet" class="theme-swatch flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs text-slate-300 transition hover:border-white/25"><span class="h-4 w-4 rounded-full" style="background:linear-gradient(135deg,#6d5cff,#a855f7)"></span>紫罗兰</button>
+        <button type="button" data-theme="violet" class="theme-swatch flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs text-slate-300 transition hover:border-white/25"><span class="h-4 w-4 rounded-full" style="background:linear-gradient(135deg,#22d3ee,#0891b2)"></span>墨刀青</button>
         <button type="button" data-theme="ocean" class="theme-swatch flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs text-slate-300 transition hover:border-white/25"><span class="h-4 w-4 rounded-full" style="background:linear-gradient(135deg,#0ea5e9,#22d3ee)"></span>深海蓝</button>
         <button type="button" data-theme="jade" class="theme-swatch flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs text-slate-300 transition hover:border-white/25"><span class="h-4 w-4 rounded-full" style="background:linear-gradient(135deg,#10b981,#2dd4bf)"></span>翡翠绿</button>
         <button type="button" data-theme="ember" class="theme-swatch flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs text-slate-300 transition hover:border-white/25"><span class="h-4 w-4 rounded-full" style="background:linear-gradient(135deg,#f97316,#f59e0b)"></span>熔岩橙</button>
@@ -255,31 +300,54 @@
   </div>
 </div>
 
-  <div id="characterPanel" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
-  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" data-close="characterPanel"></div>
-  <div class="relative w-full max-w-xl max-h-[85vh] overflow-y-auto rounded-2xl border border-white/[0.09] bg-[#16161f] p-5 shadow-2xl">
-    <div class="mb-4 flex items-center justify-between">
-      <div class="flex items-center gap-2"><span class="flex h-8 w-8 items-center justify-center rounded-lg bg-pink-500/15 text-pink-300"><iconify-icon icon="lucide:user-round" width="17"></iconify-icon></span><h3 class="font-semibold">角色固定（同一人出演所有镜头）</h3></div>
-      <button id="btnCharacterClose" class="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:text-white" title="关闭">✕</button>
+  <div id="globalPanel" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" data-close="globalPanel"></div>
+  <div class="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl border border-white/[0.09] bg-[#16161f] p-6 shadow-2xl">
+    <div class="mb-5 flex items-center justify-between">
+      <div class="flex items-center gap-2.5"><span class="flex h-9 w-9 items-center justify-center rounded-lg bg-cyan-500/15 text-cyan-300"><iconify-icon icon="lucide:settings-2" width="18"></iconify-icon></span><h3 class="text-lg font-semibold">全局设置（应用到本项目所有镜头）</h3></div>
+      <button id="btnGlobalClose" class="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:text-white" title="关闭">✕</button>
     </div>
-    <label class="block text-[11px] text-slate-500">角色名<input id="charName" type="text" class="mt-1 w-full rounded-md border border-white/10 bg-[#111119] px-2 py-1.5 text-[12px] text-slate-200 outline-none focus:border-pink-400/60" placeholder="例：小红"></label>
-    <label class="mt-3 block text-[11px] text-slate-500">外貌/服装描述（自动注入每个镜头提示词）<textarea id="charDesc" class="mt-1 w-full resize-y rounded-md border border-white/10 bg-[#111119] px-2 py-1.5 text-[12px] leading-5 text-slate-200 outline-none focus:border-pink-400/60" rows="3" placeholder="例：25 岁短发女生，白色连衣裙，蓝色眼睛，左耳有银色耳钉"></textarea></label>
-    <div class="mt-3">
-      <span class="text-[11px] text-slate-500">参考图（可选；勾选镜头「角色出场」时用作首帧）</span>
-      <div class="mt-1 flex items-center gap-3">
-        <div class="flex h-20 w-36 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/10 bg-black/40" id="charImageBox">
-          <span id="charImageEmpty" class="text-[11px] text-slate-600">未上传</span>
+
+    <div class="grid grid-cols-2 gap-4">
+      <label class="flex cursor-pointer items-center gap-3 rounded-xl border border-white/10 bg-[#1b1b25] px-4 py-3.5 text-sm text-slate-200"><input id="gblNeedAudio" type="checkbox" class="h-4 w-4 shrink-0 accent-cyan-400" checked><span>需要音频<span class="block text-[11px] text-slate-500">生成合入原生音频/配音</span></span></label>
+      <label class="flex cursor-pointer items-center gap-3 rounded-xl border border-white/10 bg-[#1b1b25] px-4 py-3.5 text-sm text-slate-200"><input id="gblSubtitle" type="checkbox" class="h-4 w-4 shrink-0 accent-cyan-400" checked><span>需要字幕<span class="block text-[11px] text-slate-500">合成时烧录镜头字幕</span></span></label>
+      <label class="flex cursor-pointer items-center gap-3 rounded-xl border border-white/10 bg-[#1b1b25] px-4 py-3.5 text-sm text-slate-200"><input id="gblBridge" type="checkbox" class="h-4 w-4 shrink-0 accent-cyan-400" checked><span>过渡补帧<span class="block text-[11px] text-slate-500">合成成片时在两镜之间插一段 H3 过渡片，关掉就是硬切（衔接靠尾帧续接时建议关）</span></span></label>
+      <label class="col-span-2 flex cursor-pointer items-center gap-3 rounded-xl border border-white/10 bg-[#1b1b25] px-4 py-3.5 text-sm text-slate-200"><input id="gblChain" type="checkbox" class="h-4 w-4 shrink-0 accent-cyan-400"><span>上一镜尾帧续接<span class="block text-[11px] text-slate-500">生成第 2 镜起自动抽上一镜成片的尾帧当本镜首帧，动作接着上一镜演（手动上传的首帧优先；默认关）</span></span></label>
+    </div>
+
+    <div class="mt-4 grid gap-4 md:grid-cols-2">
+      <div class="rounded-xl border border-white/[0.08] bg-[#1b1b25] p-4">
+      <h4 class="mb-3 flex items-center gap-2 text-base font-semibold text-cyan-300"><iconify-icon icon="lucide:user-round" width="17"></iconify-icon>角色固定</h4>
+      <label class="block text-xs text-slate-500">角色名<input id="charName" type="text" class="mt-1.5 w-full rounded-md border border-white/10 bg-[#111119] px-2.5 py-2 text-[13px] text-slate-200 outline-none focus:border-cyan-400/60" placeholder="例：小红"></label>
+      <label class="mt-3 block text-xs text-slate-500">外貌/服装描述（自动注入每个镜头提示词）<textarea id="charDesc" class="mt-1.5 w-full resize-y rounded-md border border-white/10 bg-[#111119] px-2.5 py-2 text-[13px] leading-6 text-slate-200 outline-none focus:border-cyan-400/60" rows="3" placeholder="例：25 岁短发女生，白色连衣裙，蓝色眼睛，左耳有银色耳钉"></textarea></label>
+      <div class="mt-3 flex items-center gap-3">
+        <div class="flex h-20 w-32 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/10 bg-black/40" id="charImageBox">
+          <span id="charImageEmpty" class="text-xs text-slate-600">未上传</span>
           <img id="charImagePreview" class="hidden h-full w-full object-cover" alt="角色参考图">
         </div>
         <div class="flex flex-col gap-2">
-          <button id="btnCharImage" class="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-300 transition hover:border-pink-400/40 hover:bg-pink-400/10"><iconify-icon icon="lucide:image-plus" width="14"></iconify-icon>上传参考图</button>
-          <button id="btnCharImageDel" class="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-400 transition hover:border-red-400/40 hover:text-red-300"><iconify-icon icon="lucide:trash-2" width="14"></iconify-icon>移除</button>
+          <button id="btnCharImage" class="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3.5 py-2 text-xs text-slate-300 transition hover:border-cyan-400/40 hover:bg-cyan-400/10"><iconify-icon icon="lucide:image-plus" width="14"></iconify-icon>上传参考图</button>
+          <button id="btnCharImageDel" class="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3.5 py-2 text-xs text-slate-400 transition hover:border-red-400/40 hover:text-red-300"><iconify-icon icon="lucide:trash-2" width="14"></iconify-icon>移除</button>
         </div>
       </div>
     </div>
-    <div class="mt-3 rounded-lg border border-pink-400/15 bg-pink-400/5 p-2.5 text-[11px] leading-5 text-slate-400">提示：角色描述会注入所有镜头的提示词开头；参考图用于「角色出场」镜头，图片+文字一起驱动，保证同一角色。若某镜头单独上传了首帧，则以该首帧为准。</div>
-    <div class="mt-4 flex items-center gap-2">
-      <button id="btnCharacterSave" class="flex items-center gap-2 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-pink-900/20 transition hover:brightness-110"><iconify-icon icon="lucide:check" width="16"></iconify-icon>保存角色</button>
+
+    <div class="rounded-xl border border-white/[0.08] bg-[#1b1b25] p-4">
+      <h4 class="mb-3 flex items-center gap-2 text-base font-semibold text-emerald-300"><iconify-icon icon="lucide:image" width="17"></iconify-icon>场景固定</h4>
+      <label class="block text-xs text-slate-500">场景名<input id="sceneName" type="text" class="mt-1.5 w-full rounded-md border border-white/10 bg-[#111119] px-2.5 py-2 text-[13px] text-slate-200 outline-none focus:border-emerald-400/60" placeholder="例：深夜办公室"></label>
+      <label class="mt-3 block text-xs text-slate-500">场景描述（自动注入每个镜头提示词，保证同一场景）<textarea id="sceneDesc" class="mt-1.5 w-full resize-y rounded-md border border-white/10 bg-[#111119] px-2.5 py-2 text-[13px] leading-6 text-slate-200 outline-none focus:border-emerald-400/60" rows="3" placeholder="例：深夜的现代办公室，冷色屏幕光，窗外城市夜景"></textarea></label>
+    </div>
+
+    </div>
+
+    <div class="mt-4 rounded-xl border border-white/[0.08] bg-[#1b1b25] p-4">
+      <h4 class="mb-3 flex items-center gap-2 text-base font-semibold text-red-300"><iconify-icon icon="lucide:x-circle" width="17"></iconify-icon>全局负面提示词</h4>
+      <textarea id="gblNegPrompt" class="w-full resize-y rounded-md border border-white/10 bg-[#111119] px-2.5 py-2 text-[13px] leading-6 text-slate-200 outline-none focus:border-red-400/60" rows="3" placeholder="例：模糊，低质量，畸形的手，多余的手指，文字水印"></textarea>
+      <p class="mt-1.5 text-[11px] text-slate-600">追加到每个镜头的负向提示词（全局在前，镜头自身在后）</p>
+    </div>
+
+    <div class="mt-5 flex items-center gap-2">
+      <button id="btnGlobalSave" class="flex items-center gap-2 rounded-xl bg-cyan-400 px-5 py-2.5 text-sm font-semibold text-[#08101c] shadow-lg shadow-cyan-500/20 transition hover:brightness-110"><iconify-icon icon="lucide:check" width="16"></iconify-icon>保存全局设置</button>
     </div>
   </div>
 </div>
@@ -287,20 +355,28 @@
   <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" data-close="graphPanel"></div>
   <div class="relative w-full max-w-4xl max-h-[85vh] overflow-y-auto rounded-2xl border border-white/[0.09] bg-[#16161f] p-5 shadow-2xl">
     <div class="mb-4 flex items-center justify-between">
-      <div class="flex items-center gap-2"><span class="flex h-8 w-8 items-center justify-center rounded-lg bg-fuchsia-500/15 text-fuchsia-300"><iconify-icon icon="lucide:network" width="17"></iconify-icon></span><h3 class="font-semibold">🧠 剧本知识图谱</h3><span class="text-xs text-slate-500">可视化 + 编辑 · 存储于 Neo4j（neo4j-comfyui）</span></div>
-      <button id="btnGraphClose" class="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:text-white" title="关闭">✕</button>
+      <div class="flex items-center gap-2"><span class="flex h-8 w-8 items-center justify-center rounded-lg bg-fuchsia-500/15 text-fuchsia-300"><iconify-icon icon="lucide:network" width="17"></iconify-icon></span><h3 class="font-semibold">🧠 知识图谱</h3><span class="text-xs text-slate-500">可视化 + 编辑 · 存储于 Neo4j（neo4j-comfyui）</span></div>
+      <div class="flex items-center gap-2">
+        <div class="flex items-center rounded-lg border border-white/10 bg-black/20 p-0.5">
+          <button id="btnGraphScript" class="graph-tab rounded-md px-3 py-1.5 text-xs font-semibold text-slate-400 transition" data-active="1">剧本图谱</button>
+          <button id="btnGraphAssets" class="graph-tab rounded-md px-3 py-1.5 text-xs font-semibold text-slate-400 transition" data-active="0">素材图谱</button>
+        </div>
+        <button id="btnGraphClose" class="flex h-7 w-7 items-center justify-center rounded-lg border border-white/10 text-slate-400 transition hover:text-white" title="关闭">✕</button>
+      </div>
     </div>
     <div id="graphCanvas" class="mb-4 h-80 w-full rounded-xl border border-white/[0.08] bg-black/40"></div>
     <div id="graphNodes" class="grid gap-3 md:grid-cols-2"></div>
-    <div class="mt-4 flex items-center gap-2">
+    <div id="assetGraphNodes" class="hidden grid gap-2 md:grid-cols-2"></div>
+    <div id="graphScriptTools" class="mt-4 flex items-center gap-2">
       <button id="btnGraphAdd" class="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-slate-300 transition hover:text-white"><iconify-icon icon="lucide:plus" width="16"></iconify-icon>添加节点</button>
       <button id="btnGraphSave" class="flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#6d5cff] to-[#a855f7] px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-violet-900/20 transition hover:brightness-110"><iconify-icon icon="lucide:check" width="16"></iconify-icon>保存图谱</button>
     </div>
-    <label class="mt-4 block text-[11px] text-slate-500">关系（每行：起点 -> 终点 : 关系说明）<textarea id="graphEdges" class="mt-1 w-full resize-y rounded-md border border-white/10 bg-[#111119] px-2 py-1.5 text-[12px] leading-5 text-slate-200 outline-none focus:border-violet-400/60" rows="4"></textarea></label>
+    <label id="graphEdgesLabel" class="mt-4 block text-[11px] text-slate-500">关系（每行：起点 -> 终点 : 关系说明）<textarea id="graphEdges" class="mt-1 w-full resize-y rounded-md border border-white/10 bg-[#111119] px-2 py-1.5 text-[12px] leading-5 text-slate-200 outline-none focus:border-violet-400/60" rows="4"></textarea></label>
   </div>
 </div>
 
 </main>
+</div>
 
 <div id="toast" class="pointer-events-none fixed bottom-6 left-1/2 z-50 hidden -translate-x-1/2 rounded-xl border border-violet-400/30 bg-[#242232] px-4 py-3 text-sm text-violet-100 shadow-2xl">操作已更新</div>
 </div>
