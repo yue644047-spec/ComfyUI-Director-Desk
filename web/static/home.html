@@ -192,7 +192,7 @@ async function loadProjects() {
     var h = "";
     list.forEach(function (p, i) {
       var isCur = p.id === r.current, d = pct(p);
-      h += '<button data-id="' + esc(p.id) + '" class="card group overflow-hidden rounded-2xl border bg-[#101522] text-left ' + (isCur ? 'border-cyan-400/50' : 'border-white/10') + '">'
+      h += '<div data-id="' + esc(p.id) + '" class="card group cursor-pointer overflow-hidden rounded-2xl border bg-[#101522] ' + (isCur ? 'border-cyan-400/50' : 'border-white/10') + '">'
         + '<div class="relative h-32 overflow-hidden bg-gradient-to-br ' + COVERS[i % COVERS.length] + '">'
         + '<iconify-icon class="absolute bottom-2 left-4 text-white/25" icon="lucide:clapperboard" width="64"></iconify-icon>'
         + '<span class="absolute right-4 top-4 rounded-md bg-black/35 px-2 py-1 text-xs">' + (p.scenes || 0) + ' 镜</span>'
@@ -202,8 +202,11 @@ async function loadProjects() {
         + '<div class="flex justify-between text-xs text-slate-500"><span>项目</span><span class="flex items-center gap-1"><iconify-icon icon="lucide:clock-3" width="12"></iconify-icon>' + esc(fmtTime(p.updated)) + '</span></div>'
         + '<h3 class="mt-2 truncate font-semibold">' + esc(p.name) + '</h3>'
         + '<div class="mt-4 h-1.5 overflow-hidden rounded-full bg-white/[.08]"><div class="h-full rounded-full bg-cyan-400" style="width:' + d + '%"></div></div>'
-        + '<p class="mt-2 flex items-center justify-between text-xs text-slate-500"><span>' + d + '% · ' + (p.scenes || 0) + ' 个镜头</span><span class="arrow flex items-center gap-1 text-cyan-300">打开<iconify-icon icon="lucide:chevron-right" width="14"></iconify-icon></span></p>'
-        + '</div></button>';
+        + '<p class="mt-2 flex items-center justify-between text-xs text-slate-500"><span>' + d + '% · ' + (p.scenes || 0) + ' 个镜头</span>'
+        + '<span class="flex items-center gap-2"><span class="arrow flex items-center gap-1 text-cyan-300">打开<iconify-icon icon="lucide:chevron-right" width="14"></iconify-icon></span>'
+        + (p.id === "default" ? '' : '<button data-del="' + esc(p.id) + '" title="删除项目" class="grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-red-500/15 hover:text-red-300"><iconify-icon icon="lucide:trash-2" width="14"></iconify-icon></button>')
+        + '</span></p>'
+        + '</div></div>';
     });
     h += '<button id="btnNewCard" class="flex min-h-[250px] flex-col items-center justify-center rounded-2xl border border-dashed border-slate-700 bg-white/[.02] text-slate-500 transition hover:border-cyan-400/50 hover:bg-cyan-400/5 hover:text-cyan-300">'
       + '<span class="mb-4 grid h-12 w-12 place-items-center rounded-full bg-white/5"><iconify-icon icon="lucide:plus" width="26"></iconify-icon></span>'
@@ -218,6 +221,14 @@ async function openProject(id) {
   var r = await api("/api/project/select", { id: id });
   if (!r.ok) { toast("打开失败：" + (r.error || "")); return; }
   location.href = "/index.html";
+}
+
+async function deleteProject(id) {
+  if (!confirm("确定删除该项目？分镜与备份文件会一并删除，无法恢复。")) return;
+  var r = await api("/api/project/delete", { id: id });
+  if (!r.ok) { toast("删除失败：" + (r.error || "")); return; }
+  toast("项目已删除");
+  loadProjects();
 }
 
 function showNew() { $("newProject").style.display = "grid"; $("newName").focus(); }
@@ -237,6 +248,8 @@ $("newName").addEventListener("keydown", function (e) { if (e.key === "Enter") c
 $("newProject").addEventListener("click", function (e) { if (e.target === this) hideNew(); });
 $("featured").addEventListener("click", function () { if (currentId) openProject(currentId); });
 $("projects").addEventListener("click", function (e) {
+  var del = e.target.closest("[data-del]");
+  if (del) { deleteProject(del.getAttribute("data-del")); return; }
   var card = e.target.closest("[data-id]");
   if (card) openProject(card.getAttribute("data-id"));
   else if (e.target.closest("#btnNewCard")) showNew();

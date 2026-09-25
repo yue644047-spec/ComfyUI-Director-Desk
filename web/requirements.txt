@@ -1,2 +1,6 @@
-# Web 端唯一额外依赖（拼接用 ffmpeg）。其余依赖都在 clora 环境里。
-imageio-ffmpeg
+# 导播台额外依赖（缺哪个就降级对应功能，不阻断主流程）
+imageio-ffmpeg   # 拼接 + 字幕烧录
+pymysql          # 素材库 MySQL 连接池（缺则回退本地索引）
+neo4j            # 知识图谱（缺则跳过图谱功能）
+jieba            # 脚本中文分词（缺则用规则拆分）
+# requests / SQLAlchemy 已在根目录 requirements.txt 里
